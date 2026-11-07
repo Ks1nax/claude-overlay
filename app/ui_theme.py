@@ -58,7 +58,7 @@ GLYPHS = {
     "hide": ("", "—"), "close": ("", "✕"), "help": ("", "?"), "info": ("", "ⓘ"), "compact": ("", "▭"),
     "expand": ("", "▢"), "copy": ("", "⧉"), "down": ("", "↓"), "shield": ("", "🛡"),
     "mic": ("", "🎙"), "check": ("", "✓"), "warn": ("", "⚠"), "play": ("", "▶"),
-    "delete": ("", "🗑"), "download": ("", "⬇"), "folder": ("", "📁"), "eye": ("", "👁"),
+    "delete": ("", "🗑"), "download": ("", "⬇"), "folder": ("", "📁"), "history": ("", "🕘"), "crop": ("", "✂"), "send": ("", "➤"), "eye": ("", "👁"),
 }
 
 STATE_KEYS = {"loading": "MUTED", "idle": "OK", "await": "PURPLE", "followup": "PURPLE", "stt": "WARN",

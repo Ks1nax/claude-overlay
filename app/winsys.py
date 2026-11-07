@@ -46,6 +46,11 @@ if IS_WIN:
     user32.IsWindowVisible.restype = wt.BOOL
     user32.IsWindow.argtypes = [wt.HWND]
     user32.IsWindow.restype = wt.BOOL
+    user32.GetForegroundWindow.restype = wt.HWND
+    user32.SetForegroundWindow.argtypes = [wt.HWND]
+    user32.BringWindowToTop.argtypes = [wt.HWND]
+    user32.AttachThreadInput.argtypes = [wt.DWORD, wt.DWORD, wt.BOOL]
+    kernel32.GetCurrentThreadId.restype = wt.DWORD
     user32.IsIconic.argtypes = [wt.HWND]
     user32.IsIconic.restype = wt.BOOL
     user32.GetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int]
@@ -180,6 +185,29 @@ def style_frame(hwnd, border_hex=None, rounded=True):
             dwm.DwmSetWindowAttribute(wt.HWND(hwnd), 34, ctypes.byref(colorref), ctypes.sizeof(colorref))
     except Exception:
         pass
+
+
+def force_foreground(hwnd):
+    """Сделать окно активным (чтобы печатать в нём) по горячей клавише из другой программы."""
+    if not IS_WIN or not hwnd:
+        return False
+    try:
+        fg = user32.GetForegroundWindow()
+        if fg == hwnd:
+            return True
+        # «подключаемся» к вводу активного окна — тогда Windows разрешает передать фокус нам (без лишних нажатий)
+        fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        my_tid = kernel32.GetCurrentThreadId()
+        attached = bool(fg_tid and fg_tid != my_tid and user32.AttachThreadInput(my_tid, fg_tid, True))
+        try:
+            ok = bool(user32.SetForegroundWindow(hwnd))
+            user32.BringWindowToTop(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(my_tid, fg_tid, False)
+        return ok
+    except Exception:
+        return False
 
 
 def is_tool_window(hwnd):

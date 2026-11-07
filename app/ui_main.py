@@ -14,12 +14,13 @@ from . import winsys
 from .audio import Listener, SystemAudio, prepare_audio, level_bars, save_wav
 from .claude import ClaudeSession, cli_ask, api_ask, explain_error, find_claude
 from .config import S, WORKDIR, HERE, LAST_F7_WAV, SETUP_STATE_PATH, load_api_key
-from .hotkeys import HotkeyManager, display as key_display
+from .hotkeys import HotkeyManager, display as key_display, ACTIONS as HK_ACTIONS, current_binds
 from .materials import Materials, extract_material, material_terms
 from .prompts import system_prompt, listen_prompt, analyze_prompt, MATERIALS_INTRO, FILE_IMAGE_RULE
 from .screen import grab_screen, encode_image
 from . import stt
 from . import providers
+from . import history
 from .textfmt import (MATH, CODE, md_segments, code_blocks, last_code_block, tex_rows, render_tex, warm_up_math,
                       split_wake, is_junk)
 from .ui_theme import (T, F, MONO, IS_WIN, IS_MAC, IconButton, ThinScroll, Tooltip, hand, text_cursor, init_fonts,
@@ -156,6 +157,7 @@ class App:
                 ("compact", "compact", self.toggle_compact, "Компактно: только строка состояния"),
                 ("help", "info", self.toggle_info, "Подсказки: что можно сказать и нажать"),
                 ("settings", "settings", self.open_settings, "Настройки"),
+                ("history", "history", self.open_history, "История вопросов и ответов"),
                 ("new", "new", self.reset, "Новая задача (очистить диалог)"),
                 ("paste", "paste", self.paste_material, "Материалы: текст из буфера (Ctrl+V)"),
                 ("attach", "attach", self.pick_files, "Материалы: прикрепить файлы")):
@@ -211,6 +213,7 @@ class App:
         grip.bind("<ButtonPress-1>", self._resize_start)
         grip.bind("<B1-Motion>", self._resize_move)
         grip.bind("<ButtonRelease-1>", self._drag_end)
+        self._build_ask_bar(outer, body)
         self.shield_lbl = tk.Label(foot, text="", bg=T["BG2"], fg=T["MUTED"], font=F(-2), anchor="w",
                                    cursor=hand())
         self.shield_lbl.pack(side="left", padx=(12, 6), pady=5)
@@ -361,12 +364,14 @@ class App:
         r = self.root
         width = r.winfo_width() if r.winfo_width() > 100 else int(S.width or 560)  # до показа ширина ещё 1
         if small:
-            for w in (self.mat_bar, self.heard_lbl, self.body, self.foot):
+            for w in (self.mat_bar, self.heard_lbl, self.body, self.foot, self.ask_bar):
                 w.pack_forget()
             r.geometry(f"{width}x{HEADER_H + 2}")
             self.icons["compact"].set_glyph("expand")
         else:
             self.foot.pack(fill="x", side="bottom")
+            if S.text_input:
+                self.ask_bar.pack(fill="x", side="bottom")
             self.heard_lbl.pack(fill="x", padx=14, pady=(6, 0))
             self.body.pack(fill="both", expand=True)
             self._update_mat_bar()
@@ -542,7 +547,7 @@ class App:
         if live:
             self.text.insert("end", icon + " " + question + "\n", ("liveq",))
         else:
-            self.text.insert("end", "› " + question + "\n", ("user",))
+            self.text.insert("end", ("⌨ " if icon == "⌨" else "› ") + question + "\n", ("user",))
         if not with_screen and not live:
             self.text.insert("end", "(без скриншота)\n", ("meta",))
         self.text.insert("end", "\n", ("gap",))  # немного воздуха между вопросом и ответом
@@ -694,6 +699,10 @@ class App:
             self._idle()
         elif kind == "listen":
             self.listen_key()
+        elif kind == "region":
+            self.pick_region()
+        elif kind == "type":
+            self.focus_entry(force=True)
         elif kind == "listen_cancel":
             self.listen_cancel()
         elif kind == "listen_text":
@@ -823,6 +832,14 @@ class App:
 
         img = None
         hidden = False
+        region = getattr(self, "pending_shot", None)
+        if screen and region is not None:  # заранее выделенный кусок экрана — вместо всего монитора
+            self.set_pending_shot(None)
+            img = region.copy()
+            side = S.listen_image_side if listen else S.max_image_side
+            from PIL import Image
+            img.thumbnail((side, side), Image.LANCZOS)
+            screen = False
         if screen:
             self.set_state("think", "Делаю скриншот…")
             xy = (self.root.winfo_pointerx(), self.root.winfo_pointery())
@@ -838,16 +855,19 @@ class App:
         text = prompt or question
         if img is not None and self.cli and S.cli_image_mode == "file" and not use_session:
             path = self._save_shot(img)
-            text = f"Скриншот экрана: {path}\n\nВопрос (распознан голосом): {text}"
+            text = f"Скриншот экрана: {path}\n\nВопрос: {text}"
         elif img is not None:
             b64, media = encode_image(img)
             content.append({"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}})
         content.append({"type": "text", "text": text})
 
-        self._begin_exchange(question, img is not None, live=listen, icon=icon)
+        source = getattr(self, "next_source", "voice")
+        self.next_source = "voice"
+        self.cur_source = "f7" if listen and icon == "🎧" else "materials" if icon == "📎" else source
+        self._begin_exchange(question, img is not None, live=listen, icon="⌨" if self.cur_source == "text" else icon)
         self.ask_t0 = time.time()
-        print(f"[вопрос] {'звук компьютера' if listen else 'голос'}, "
-              + ("без скриншота" if img is None else
+        print(f"[вопрос] {self.cur_source}, "
+              + ("без скриншота" if img is None else "выделенный кусок экрана" if region is not None else
                  ("скриншот — окно не пряталось (оно и так невидимо)" if not hidden else
                   "скриншот — окно на миг пряталось (невидимость недоступна)")))
         self.set_state("think", "Думаю…")
@@ -955,6 +975,12 @@ class App:
               + (f", ошибка: {str(error)[:200]}" if error else "") + (f", {note}" if note else ""))
         if answer:
             self.last_answer = self.cur_answer
+        if S.history_save and (answer or error) and self.cur_question:
+            try:
+                history.add(self.cur_question, answer + (("\n" + note) if note else ""),
+                            kind=getattr(self, "cur_source", "voice"), mode=self._mode_name(), error=str(error or ""))
+            except OSError as e:
+                print("[история] не удалось сохранить:", e)
         if not self.cli:  # в режиме подписки историю хранит сам Claude Code
             if answer:
                 self.history.append({"role": "assistant", "content": answer + ("\n" + note if note else "")})
@@ -1183,6 +1209,8 @@ class App:
             self._write([("📋 В буфере обмена нет текста. Скопируй текст (Ctrl+C) и нажми 📋 ещё раз.\n", ("meta",))])
 
     def _on_ctrl_key(self, e):
+        if self.root.focus_get() is getattr(self, "entry", None):
+            return None  # в поле вопроса Ctrl+V/C/A работают как обычно
         if e.keycode == 86 or (e.keysym or "").lower() == "v":  # V — и в русской раскладке
             self.paste_material()
             return "break"
@@ -1346,7 +1374,7 @@ class App:
         self.hide() if self.visible else self.show()
 
     def _hotkey_actions(self):
-        return {"talk": S.hotkey_talk, "toggle": S.hotkey_toggle, "listen": S.hotkey_listen}
+        return current_binds(S)
 
     def _start_tray(self):
         from .tray import Tray
@@ -1397,6 +1425,112 @@ class App:
             return
         self.settings_win = SettingsWindow(self, tab)
 
+    # ------------------------------------------------------------ вопрос текстом и кусок экрана
+    PLACEHOLDER = "Напиши вопрос и нажми Enter…"
+
+    def _build_ask_bar(self, outer, body):
+        """Строка ввода внизу: ✂ (выделить кусок экрана) · поле вопроса · ➤ (отправить)."""
+        bar = self.ask_bar = tk.Frame(outer, bg=T["BG"])
+        if S.text_input:
+            bar.pack(fill="x", side="bottom", before=body)
+        inner = tk.Frame(bar, bg=T["BG3"], highlightthickness=1, highlightbackground=T["BORDER"],
+                         highlightcolor=T["ACCENT"])
+        inner.pack(fill="x", padx=10, pady=(4, 8))
+        self.ask_inner = inner
+        self.crop_btn = IconButton(inner, "crop", self.pick_region,
+                                   f"Выделить кусок экрана для вопроса ({key_display(S.hotkey_region)})")
+        self.crop_btn.pack(side="left", padx=(4, 0))
+        self.shot_chip = tk.Label(inner, text="", bg=T["ACCENT"], fg="#ffffff", font=F(-2, "bold"), padx=6,
+                                  cursor=hand())
+        self.shot_chip.bind("<Button-1>", lambda e: self.set_pending_shot(None))
+        Tooltip(self.shot_chip, "К следующему вопросу приложится выделенный кусок экрана. Щёлкни — убрать.")
+        self.send_btn = IconButton(inner, "send", self.submit_text, "Отправить (Enter)")
+        self.send_btn.pack(side="right", padx=(0, 4))
+        e = self.entry = tk.Entry(inner, bg=T["BG3"], fg=T["FAINT"], insertbackground=T["FG"], relief="flat",
+                                  font=F(0), bd=0, highlightthickness=0, selectbackground=T["SEL"],
+                                  selectforeground=T["FG"], cursor=text_cursor())
+        e.pack(side="left", fill="x", expand=True, padx=6, ipady=6)
+        e.insert(0, self.PLACEHOLDER)
+        e.bind("<FocusIn>", self._entry_focus_in)
+        e.bind("<FocusOut>", self._entry_focus_out)
+        e.bind("<Return>", lambda ev: self.submit_text())
+        e.bind("<Escape>", lambda ev: (e.delete(0, "end"), self.root.focus_set()))
+        # окно без рамки само фокус не получает — забираем его при щелчке в поле
+        e.bind("<ButtonPress-1>", lambda ev: self.focus_entry(), add="+")
+
+    def _entry_focus_in(self, _e=None):
+        if self.entry.get() == self.PLACEHOLDER and self.entry.cget("fg") == T["FAINT"]:
+            self.entry.delete(0, "end")
+        self.entry.config(fg=T["FG"])
+
+    def _entry_focus_out(self, _e=None):
+        if not self.entry.get().strip():
+            self.entry.delete(0, "end")
+            self.entry.insert(0, self.PLACEHOLDER)
+            self.entry.config(fg=T["FAINT"])
+
+    def focus_entry(self, force=False):
+        """Курсор — в поле вопроса. force: по горячей клавише из другой программы (окно становится активным)."""
+        if not S.text_input:
+            S.update(text_input=True)
+        self.show()
+        self._expand_for_answer()
+        winsys.force_foreground(winsys.tk_hwnd(self.root))
+        self.root.focus_force()
+        self.entry.focus_set()
+        self._entry_focus_in()
+
+    def submit_text(self):
+        text = self.entry.get().strip()
+        if not text or (text == self.PLACEHOLDER and self.entry.cget("fg") == T["FAINT"]):
+            return
+        self.entry.delete(0, "end")
+        self.heard_lbl.config(text="Написал: " + text)
+        print(f"[текст] вопрос ({len(text.split())} слов)")
+        self.forced_until = self.followup_until = 0.0
+        self.next_source = "text"
+        body = split_wake(text)  # «Клод, …» в тексте тоже можно — лишнее слово уберём
+        self.command((body if body is not None else text).strip(" ,.:;!?-—…") or text)
+        self.next_source = "voice"
+
+    def pick_region(self):
+        """Выделить мышкой кусок экрана — он приложится к следующему вопросу (голосом, текстом или F7)."""
+        if getattr(self, "_picker", None) is not None:
+            return
+        from .region import RegionPicker
+
+        def done(img):
+            self._picker = None
+            if img is None:
+                return
+            self.set_pending_shot(img)
+            self.show()
+            self._expand_for_answer()
+            if S.text_input:
+                self.focus_entry(force=True)
+
+        try:
+            self._picker = RegionPicker(self, done)
+        except Exception as e:
+            self._picker = None
+            self._write([(f"\nНе удалось выделить кусок экрана: {e}\n", ("err",))])
+
+    def set_pending_shot(self, img):
+        self.pending_shot = img
+        if img is None:
+            self.shot_chip.pack_forget()
+            self.heard_lbl.config(text="")
+        else:
+            self.shot_chip.config(text=f"✂ {img.width}×{img.height}  ✕")
+            self.shot_chip.pack(side="left", padx=(4, 0), after=self.crop_btn)
+            self.heard_lbl.config(text="✂ Кусок экрана выбран — задай вопрос голосом, текстом или "
+                                       f"{key_display(S.hotkey_listen)}")
+            print(f"[кусок экрана] {img.width}×{img.height}")
+
+    def open_history(self):
+        from .ui_dialogs import show_history
+        show_history(self)
+
     def toggle_info(self):
         """Кнопка «i»: короткая подсказка выпадает под заголовком; повторное нажатие (или щелчок в окне) прячет."""
         win = getattr(self, "info_win", None)
@@ -1415,6 +1549,8 @@ class App:
                 (k, "вопрос со звука компьютера (лекция, созвон): нажми в начале и в конце · Esc — отмена"),
                 (t8, "следующая фраза — команда без «Клод»"),
                 (t9, "спрятать / показать окно"),
+                (key_display(S.hotkey_region) + " или ✂", "выделить кусок экрана — приложится к следующему вопросу"),
+                (key_display(S.hotkey_type), "написать вопрос текстом (поле внизу окна)"),
                 ("📎  📋", "материалы: файлы, текст из буфера или перетащи файл в окно")]
         w = self.info_win = tk.Toplevel(self.root)
         w.withdraw()
@@ -1498,7 +1634,7 @@ class App:
                 self.listen_session = None
             self._write([(("Подключение к ИИ: " + self._mode_name() + "\n")
                           if ok else ("\n" + problem + "\n"), ("meta",) if ok else ("err",))])
-        if changed & {"hotkey_talk", "hotkey_toggle", "hotkey_listen"}:
+        if changed & {k for _, k in HK_ACTIONS}:
             self.hk.set_binds(self._hotkey_actions())
             self._update_hint()
         if "alpha" in changed:
@@ -1522,6 +1658,11 @@ class App:
             for w in (self.heard_lbl, self.mat_lbl, self.shield_lbl):
                 w.config(font=F(-2))
             self.math_cache.clear()
+        if "text_input" in changed and not (self.compact and not self.expanded_for_answer):
+            if S.text_input:
+                self.ask_bar.pack(fill="x", side="bottom", before=self.body)
+            else:
+                self.ask_bar.pack_forget()
         if "compact" in changed:
             self.compact = bool(S.compact)
             self.expanded_for_answer = False

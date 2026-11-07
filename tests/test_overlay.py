@@ -694,6 +694,43 @@ def test_ui_main_window():
         assert app.root.winfo_height() > 150
         S.update(compact=False)
         pump(app, 0.3)
+        # вопрос текстом: поле внизу, Enter — отправить; история сохраняется
+        from app import history
+        n_calls = len(fake_cli_ask.calls)
+        app.focus_entry()
+        app.entry.delete(0, "end")
+        app.entry.insert(0, "сколько будет 2+2")
+        app.submit_text()
+        pump(app, 1.0)
+        assert len(fake_cli_ask.calls) == n_calls + 1 and fake_cli_ask.calls[-1][0][-1]["text"] == "сколько будет 2+2"
+        assert "⌨ сколько будет 2+2" in app.text.get("1.0", "end")
+        recs = history.load()
+        assert recs and recs[0]["q"] == "сколько будет 2+2" and recs[0]["kind"] == "text" and "42" in recs[0]["a"]
+        assert history.load("2+2") and not history.load("такого точно нет")
+        # кусок экрана: рамка мышкой → прикладывается к следующему вопросу вместо всего экрана
+        from app.region import RegionPicker
+        got = []
+        picker = RegionPicker(app, got.append)
+        pump(app, 0.3)
+        c = picker.c
+        c.event_generate("<ButtonPress-1>", x=100, y=120)
+        c.event_generate("<B1-Motion>", x=300, y=260)
+        c.event_generate("<ButtonRelease-1>", x=300, y=260)
+        pump(app, 0.2)
+        assert got and got[0].size == (200, 140), got
+        app.set_pending_shot(got[0])
+        app.on_heard("Клод, что тут")
+        pump(app, 1.0)
+        imgs = [b for b in fake_cli_ask.calls[-1][0] if b["type"] == "image"]
+        import base64, io
+        from PIL import Image
+        assert imgs and Image.open(io.BytesIO(base64.b64decode(imgs[0]["source"]["data"]))).size == (200, 140)
+        assert getattr(app, "pending_shot", None) is None
+        # окно истории
+        app.open_history()
+        pump(app, 0.4)
+        assert app.history_win is not None
+        app.history_win.destroy()
         # тема меняется сразу, без перезапуска
         from app.ui_theme import THEMES
         for th in ("light", "midnight", "dark"):

@@ -13,7 +13,7 @@ from . import stt, winsys
 from .audio import list_input_devices, level_fraction, load_wav
 from .claude import find_claude, claude_version, check_login, explain_error
 from .config import S, DEFAULTS, LOG_PATH, HERE, LAST_F7_WAV, load_api_key, save_api_key, mask_secret
-from .hotkeys import ACTION_TITLES, display as key_display, problems as key_problems, parse_spec
+from .hotkeys import ACTIONS as HK_ACTIONS, current_binds, ACTION_TITLES, display as key_display, problems as key_problems, parse_spec
 from .prompts import default_system_prompt, default_listen_prompt, ANALYZE_PROMPT
 from .setup_tools import autostart_enabled, set_autostart
 from .ui_dialogs import make_dialog, show_dialog, show_text
@@ -788,7 +788,7 @@ class SettingsWindow:
                                   "Пока оверлей запущен, эти клавиши не доходят до других программ.")
         c = card(p)
         self.key_lbls = {}
-        for action, skey in (("listen", "hotkey_listen"), ("talk", "hotkey_talk"), ("toggle", "hotkey_toggle")):
+        for action, skey in HK_ACTIONS:
             r = row(c, ACTION_TITLES[action])
             lbl = tk.Label(r, text=key_display(S.get(skey)), bg=T["BG3"], fg=T["FG"], font=F(1, "bold"), width=12,
                            pady=4)
@@ -813,8 +813,8 @@ class SettingsWindow:
         self.app.hk.capture_next(got)
 
     def _set_key(self, skey, spec):
-        trial = {"listen": S.hotkey_listen, "talk": S.hotkey_talk, "toggle": S.hotkey_toggle}
-        action = {"hotkey_listen": "listen", "hotkey_talk": "talk", "hotkey_toggle": "toggle"}[skey]
+        trial = current_binds(S)
+        action = {k: a for a, k in HK_ACTIONS}[skey]
         trial[action] = spec
         p = parse_spec(spec)
         bad = [w for w in key_problems(trial) if "нельзя" in w or "дважды" in w]
@@ -827,7 +827,7 @@ class SettingsWindow:
         self._refresh_key_warn()
 
     def _refresh_key_warn(self):
-        warn = key_problems({"listen": S.hotkey_listen, "talk": S.hotkey_talk, "toggle": S.hotkey_toggle})
+        warn = key_problems(current_binds(S))
         self.key_warn.config(text="\n".join("⚠ " + w for w in warn) if warn else "✓ Конфликтов нет.",
                              fg=T["WARN"] if warn else T["OK"])
 
@@ -842,6 +842,8 @@ class SettingsWindow:
         self._slider(c, "Высота", "height", 220, min(1600, sh), 10, "{:.0f} пикс.", "Положение и размер окна "
                      "запоминаются сами, когда двигаешь его мышкой", as_int=True,
                      value=S.height or self.app.root.winfo_height())
+        self._toggle(c, "Поле для вопроса текстом", "text_input",
+                     f"Внизу окна; {key_display(S.hotkey_type)} — сразу поставить туда курсор из любой программы")
         self._toggle(c, "Компактный режим", "compact",
                      "Окно — маленькая полоска со статусом; при ответе разворачивается само")
         Choice(row(c, "Шрифт формул"), [("cm", "Как в учебнике (Computer Modern)"), ("stix", "STIX (как в Word)"),
@@ -918,6 +920,10 @@ class SettingsWindow:
         c = card(p, "Система")
         self._toggle(c, "Значок в трее", "tray", "Его видно на демонстрации экрана (панель задач видна всем) — "
                                                  "поэтому по умолчанию выключен")
+        r = row(c, "Сохранять историю вопросов и ответов",
+                "Только текст, только на этом компьютере (workspace\\history). Смотреть — кнопка «История» в окне")
+        Toggle(r, S.history_save, lambda v: S.update(history_save=bool(v))).pack(side="left")
+        Button(r, "Открыть", self.app.open_history, small=True).pack(side="left", padx=(8, 0))
         r = row(c, "Запускать вместе с Windows", "Ярлык в папке «Автозагрузка»")
         t = Toggle(r, autostart_enabled(), lambda v: self._autostart(v, t))
         t.pack()

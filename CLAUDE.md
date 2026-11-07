@@ -52,6 +52,10 @@
     LM Studio, свой адрес): один клиент формата OpenAI Chat Completions на urllib (поток SSE), картинка — data:-URL
     (без «зрения» не передаётся), `list_models`, `check`, `explain`; ключи — `workspace/api_keys.json`.
     `S.backend`: subscription / api (Anthropic) / provider; история диалога для api и provider хранится в окне.
+  - `history.py` — история между запусками: `workspace/history/ГГГГ-ММ-ДД.jsonl` (вопрос, ответ, способ: voice/text/f7/
+    materials), `load(поиск)`, `export_markdown`; окно — `ui_dialogs.show_history`; выключается `S.history_save`.
+  - `region.py` — `RegionPicker`: снимок монитора под курсором затемнённым на весь экран, рамка мышкой → кусок
+    (`App.pending_shot`) уходит со следующим вопросом вместо всего экрана.
   - `materials.py` — извлечение текста и `Materials` (add/remove/text/clear), `material_terms` → hotwords.
   - `hotkeys.py` — `HotkeyManager` (хук pynput с `win32_event_filter`, сочетания с Ctrl/Alt/Shift, `capture_next`
     для переназначения нажатием), `problems` (повторы, буквы без модификатора, занятые клавиши).
@@ -125,6 +129,10 @@ claude -p --input-format stream-json --output-format stream-json --verbose --inc
   (`toggle_info`, всплывает под заголовком, прячется щелчком в окне), служебные сообщения запуска — только в журнал.
   Нижняя строка (невидимость, уголок) пакуется `side="bottom"` до поля ответа, у `Text` `height=1` — иначе
   поле ответа забирало всё место и строка исчезала.
+- **Вопрос текстом**: поле внизу (`ask_bar`, `S.text_input`), `submit_text` → `command()` (команды работают).
+  Окно без рамки само не получает клавиатуру — `focus_entry(force=True)` делает его активным через
+  `winsys.force_foreground` (AttachThreadInput, без лишних нажатий; проверено вживую — текст печатается).
+  Ctrl+V/C в поле — обычные (не в материалы). Клавиши: `hotkeys.ACTIONS` (listen, talk, toggle, region, type).
 - **Тема меняется без перезапуска**: цвета в коде брать только из `T[...]`; свой элемент с рисованием — метод
   `retheme(cmap)`; вопрос рисуется подложкой `Q_BG` (фон перевода строки тянется на всю ширину), разделитель —
   тег `sep` с фоном `BORDER` и шрифтом 1 пт.

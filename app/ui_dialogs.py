@@ -115,12 +115,15 @@ HELP = [
         ("Esc во время записи", "отменить запись"),
         ("{talk}", "следующая фраза — команда без «Клод»"),
         ("{toggle}", "спрятать / показать окно"),
+        ("{region} или ✂ внизу окна", "выделить мышкой кусок экрана — он приложится к следующему вопросу вместо всего экрана"),
+        ("{type}", "написать вопрос текстом: курсор встанет в поле внизу окна; Enter — отправить"),
         ("Ctrl+V в окне", "текст из буфера — в материалы"),
     ]),
     ("Кнопки вверху окна", [
         ("📎", "прикрепить файлы: PDF, Word, PowerPoint, текст, картинки (или перетащи файл в окно)"),
         ("📋", "текст из буфера обмена — в материалы"),
         ("⟲", "новая задача: очистить диалог"),
+        ("🕘", "история: все прошлые вопросы и ответы, поиск, сохранить в файл"),
         ("⚙", "настройки: модели распознавания, звук, подключение к ИИ, клавиши, вид, невидимость"),
         ("ⓘ", "короткие подсказки — эта справка открывается оттуда"),
         ("▭", "компактный режим: только строка состояния, при ответе окно разворачивается"),
@@ -157,6 +160,7 @@ def show_help(app):
     t.tag_configure("d", foreground=T["MUTED"], lmargin1=30, lmargin2=30, spacing3=6)
     keys = {"listen": key_display(S.hotkey_listen), "talk": key_display(S.hotkey_talk),
             "toggle": key_display(S.hotkey_toggle), "followup": S.followup_seconds,
+            "region": key_display(S.hotkey_region), "type": key_display(S.hotkey_type),
             "pre": f"{S.listen_pre_seconds:g}"}
     for title, items in HELP:
         t.insert("end", title + "\n", ("h",))
@@ -166,4 +170,137 @@ def show_help(app):
     t.insert("end", "\nПодробности — в README.md в папке программы.\n", ("d",))
     t.config(state="disabled")
     top.bind("<Escape>", lambda e: top.destroy())
+    show_dialog(app, top)
+
+
+def show_history(app):
+    """История вопросов и ответов между запусками: поиск, просмотр, копирование, выгрузка в файл."""
+    from tkinter import filedialog, messagebox
+    from . import history
+    from .config import S
+    from .textfmt import md_segments, MATH, CODE
+    if getattr(app, "history_win", None) is not None:
+        try:
+            app.history_win.deiconify()
+            app.history_win.lift()
+            return
+        except tk.TclError:
+            pass
+    top = make_dialog(app, "История — Claude Overlay", size="1000x640")
+    app.history_win = top
+    top.bind("<Destroy>", lambda e: setattr(app, "history_win", None) if e.widget is top else None)
+    bar = tk.Frame(top, bg=T["BG2"])
+    bar.pack(fill="x")
+    label(bar, "История", size=3, bold=True).pack(side="left", padx=(16, 12), pady=10)
+    q = tk.Entry(bar, bg=T["BG3"], fg=T["FG"], insertbackground=T["FG"], relief="flat", font=F(0), width=34,
+                 highlightthickness=1, highlightbackground=T["BORDER"], highlightcolor=T["ACCENT"])
+    q.pack(side="left", ipady=4)
+    label(bar, "  поиск по вопросам и ответам", muted=True, size=-1).pack(side="left")
+    count = label(bar, "", muted=True, size=-1)
+    count.pack(side="right", padx=16)
+    if not S.history_save:
+        label(top, "Сохранение истории выключено (⚙ → «Невидимость и система»). Здесь — то, что было раньше.",
+              color=T["WARN"], size=-1).pack(fill="x", padx=16, pady=(6, 0))
+    body = tk.Frame(top, bg=T["BG"])
+    body.pack(fill="both", expand=True)
+    left = tk.Frame(body, bg=T["BG2"], width=330)
+    left.pack(side="left", fill="y")
+    left.pack_propagate(False)
+    lb = tk.Listbox(left, bg=T["BG2"], fg=T["FG"], selectbackground=T["ACCENT"], selectforeground="#ffffff",
+                    relief="flat", bd=0, highlightthickness=0, font=F(-1), activestyle="none")
+    sb = ThinScroll(left, lb)
+    lb.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y")
+    lb.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+    right = tk.Frame(body, bg=T["BG"])
+    right.pack(side="left", fill="both", expand=True)
+    t = tk.Text(right, wrap="word", bg=T["BG"], fg=T["FG"], bd=0, highlightthickness=0, padx=18, pady=12,
+                font=F(0), cursor=text_cursor(), spacing1=2, spacing2=2, spacing3=3, height=1,
+                selectbackground=T["SEL"], selectforeground=T["FG"])
+    tsb = ThinScroll(right, t)
+    t.configure(yscrollcommand=tsb.set)
+    tsb.pack(side="right", fill="y")
+    t.pack(side="left", fill="both", expand=True)
+    t.tag_configure("meta", foreground=T["MUTED"], font=F(-2))
+    t.tag_configure("q", foreground=T["ACCENT"], background=T["Q_BG"], font=F(0, "bold"), spacing1=6, spacing3=6,
+                    lmargin1=8, lmargin2=8)
+    t.tag_configure("b", font=F(0, "bold"))
+    t.tag_configure("h", font=F(1, "bold"))
+    t.tag_configure("ic", font=MONO(-1), background=T["CODE_BG"], foreground=T["IC_FG"])
+    t.tag_configure("code", font=MONO(-1), background=T["CODE_BG"], foreground=T["CODE_FG"], lmargin1=10,
+                    lmargin2=10)
+    t.tag_configure("err", foreground=T["ERR"])
+    foot = tk.Frame(top, bg=T["BG2"])
+    foot.pack(fill="x")
+    state = {"items": [], "cur": None}
+
+    def show(rec):
+        state["cur"] = rec
+        t.config(state="normal")
+        t.delete("1.0", "end")
+        from .history import KIND_NAMES
+        t.insert("end", f"{rec.get('t', '')} · {KIND_NAMES.get(rec.get('kind'), '')} · {rec.get('mode', '')}\n",
+                 ("meta",))
+        t.insert("end", rec.get("q", "") + "\n", ("q",))
+        t.insert("end", "\n")
+        for s, tags in md_segments(rec.get("a", "")):
+            if s == MATH:
+                t.insert("end", tags[0] + ("\n" if tags[1] else ""), ("ic",))
+            elif s != CODE:
+                t.insert("end", s, tags)
+        if rec.get("error"):
+            t.insert("end", "\nОшибка: " + rec["error"] + "\n", ("err",))
+        t.config(state="disabled")
+
+    def refresh(_e=None):
+        recs = history.load(q.get())
+        state["items"] = recs
+        lb.delete(0, "end")
+        for r in recs:
+            icon = history.KIND_ICONS.get(r.get("kind"), "•")
+            when = r.get("t", "")[5:16].replace("-", ".")
+            lb.insert("end", f" {when}  {icon} {r.get('q', '')[:60]}")
+        count.config(text=f"записей: {len(recs)}")
+        if recs:
+            lb.selection_set(0)
+            show(recs[0])
+        else:
+            t.config(state="normal")
+            t.delete("1.0", "end")
+            t.insert("end", "Пока пусто." if not q.get() else "Ничего не нашлось.", ("meta",))
+            t.config(state="disabled")
+
+    def on_select(_e=None):
+        sel = lb.curselection()
+        if sel and sel[0] < len(state["items"]):
+            show(state["items"][sel[0]])
+
+    def copy_answer():
+        if state["cur"]:
+            app._copy_text(state["cur"].get("a", ""), "ответ из истории")
+
+    def export():
+        recs = state["items"]
+        if not recs:
+            return
+        path = filedialog.asksaveasfilename(parent=top, title="Сохранить историю", defaultextension=".md",
+                                            initialfile="История Claude Overlay.md",
+                                            filetypes=[("Текст с разметкой", "*.md"), ("Текст", "*.txt")])
+        if path:
+            history.export_markdown(recs, path)
+            messagebox.showinfo("История", f"Сохранено записей: {len(recs)}\n{path}", parent=top)
+
+    def clear_all():
+        if messagebox.askyesno("История", "Удалить всю историю вопросов и ответов? Это нельзя отменить.",
+                               parent=top):
+            history.clear()
+            refresh()
+
+    lb.bind("<<ListboxSelect>>", on_select)
+    q.bind("<KeyRelease>", refresh)
+    Button(foot, "Скопировать ответ", copy_answer, small=True, icon="copy").pack(side="left", padx=(16, 6), pady=10)
+    Button(foot, "Сохранить в файл…", export, small=True).pack(side="left")
+    Button(foot, "Очистить всё", clear_all, small=True, kind="danger").pack(side="right", padx=16)
+    top.bind("<Escape>", lambda e: top.destroy())
+    refresh()
     show_dialog(app, top)

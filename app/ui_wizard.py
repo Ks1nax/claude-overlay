@@ -14,7 +14,7 @@ import tkinter as tk
 
 from . import stt, winsys
 from .config import S, HERE, SETUP_STATE_PATH, ICON_PATH
-from .hotkeys import HotkeyManager, ACTION_TITLES, display as key_display, problems as key_problems, parse_spec
+from .hotkeys import ACTIONS as HK_ACTIONS, current_binds, HotkeyManager, ACTION_TITLES, display as key_display, problems as key_problems, parse_spec
 from .ui_theme import (T, F, MONO, Button, Choice, Meter, ScrollFrame, ThinScroll, label, init_fonts, dark_title_bar,
                        hand, text_cursor)
 
@@ -729,7 +729,7 @@ class Wizard:
             self.hk = HotkeyManager(lambda ev: None)
             self.hk.start({})
         self.key_lbls = {}
-        for action, skey in (("listen", "hotkey_listen"), ("talk", "hotkey_talk"), ("toggle", "hotkey_toggle")):
+        for action, skey in HK_ACTIONS:
             r = tk.Frame(pan, bg=T["BG2"])
             r.pack(fill="x", pady=4)
             label(r, ACTION_TITLES[action], width=44).pack(side="left")
@@ -750,8 +750,8 @@ class Wizard:
         def got(spec):
             def ui():
                 if spec:
-                    trial = {"listen": S.hotkey_listen, "talk": S.hotkey_talk, "toggle": S.hotkey_toggle}
-                    trial[{"hotkey_listen": "listen", "hotkey_talk": "talk", "hotkey_toggle": "toggle"}[skey]] = spec
+                    trial = current_binds(S)
+                    trial[{k: a for a, k in HK_ACTIONS}[skey]] = spec
                     bad = [w for w in key_problems(trial) if "нельзя" in w or "дважды" in w]
                     if parse_spec(spec) and not bad:
                         S.update(**{skey: spec})
@@ -765,7 +765,7 @@ class Wizard:
         self.hk.capture_next(got)
 
     def _key_warn(self):
-        warn = key_problems({"listen": S.hotkey_listen, "talk": S.hotkey_talk, "toggle": S.hotkey_toggle})
+        warn = key_problems(current_binds(S))
         self.key_warn.config(text="\n".join("⚠ " + w for w in warn) if warn else "✓ Конфликтов нет.",
                              fg=T["WARN"] if warn else T["OK"])
 

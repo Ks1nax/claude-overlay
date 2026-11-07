@@ -29,7 +29,16 @@ ACTION_TITLES = {
     "listen": "Вопрос со звука компьютера (начать / закончить)",
     "talk": "Следующая фраза — команда без «Клод»",
     "toggle": "Спрятать / показать окно",
+    "region": "Выделить кусок экрана для вопроса",
+    "type": "Написать вопрос текстом",
 }
+# действие → имя настройки (порядок — как в окне настроек)
+ACTIONS = [("listen", "hotkey_listen"), ("talk", "hotkey_talk"), ("toggle", "hotkey_toggle"),
+           ("region", "hotkey_region"), ("type", "hotkey_type")]
+
+
+def current_binds(S):
+    return {a: S.get(k) for a, k in ACTIONS}
 
 # Клавиши, которые обычно нужны другим программам: предупреждаем
 BUSY_KEYS = {
