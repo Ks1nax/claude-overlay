@@ -28,7 +28,13 @@ SETUP_STATE_PATH = os.path.join(WORKDIR, "setup_state.json")
 
 DEFAULTS = {
     # --- Claude ---
-    "backend": "subscription",        # "subscription" — Claude Code по подписке Pro/Max; "api" — API-ключ
+    "backend": "subscription",        # "subscription" — Claude Code по подписке Pro/Max; "api" — ключ Anthropic;
+                                      # "provider" — другой провайдер по ключу (OpenAI, Gemini, OpenRouter, Ollama…)
+    "provider": "openai",             # какой провайдер (app/providers.py)
+    "provider_base_url": "",          # свой адрес сервиса ("" — стандартный для провайдера)
+    "provider_model": "",             # модель для «Клод, …» ("" — по умолчанию у провайдера)
+    "provider_listen_model": "",      # модель для F7 ("" — та же)
+    "provider_vision": "auto",        # видит ли модель картинки: auto / yes / no
     "claude_cmd": "",                 # путь к claude.exe; "" — найти самому
     "cli_model": "sonnet",            # модель для «Клод, …»: sonnet / opus / haiku
     "cli_effort": "medium",           # сколько думать: low / medium / high ("" — как в настройках Claude Code)
@@ -97,7 +103,7 @@ DEFAULTS = {
     "pos_x": None,                    # положение окна запоминается само
     "pos_y": None,
     "alpha": 1.0,                     # 1.0 — непрозрачное
-    "theme": "dark",                  # dark / black / light
+    "theme": "dark",                  # dark / midnight / black / warm / light / paper
     "compact": False,                 # маленькая полоска со статусом, разворачивается при ответе
 
     # --- невидимость и система ---
@@ -218,7 +224,7 @@ RANGES = {
     "listen_max_turns": (1, 200), "pos_x": (-20000, 20000), "pos_y": (-20000, 20000),
 }
 CHOICES = {
-    "backend": ("subscription", "api"), "theme": ("dark", "black", "light"), "monitor": ("mouse", "primary", "all"),
+    "backend": ("subscription", "api", "provider"), "provider_vision": ("auto", "yes", "no"), "theme": ("dark", "midnight", "black", "warm", "light", "paper"), "monitor": ("mouse", "primary", "all"),
     "cli_image_mode": ("inline", "file"), "whisper_device": ("auto", "cpu", "cuda"),
     "listen_style": ("short", "detailed"), "language": ("auto", "ru", "uk", "en"),
     "listen_language": ("auto", "ru", "uk", "en"), "math_fontset": ("cm", "stix", "dejavusans", "dejavuserif"),

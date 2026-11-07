@@ -48,11 +48,17 @@
   - `claude.py` — `clean_env`, поиск `claude.exe`, `check_login`, `explain_error` (понятное «что делать»),
     `ClaudeSession` (постоянный `claude -p` stream-json для F7), `cli_ask` (разовый с `--resume`), `api_ask`,
     `claude_read_file` (сканы/картинки).
+  - `providers.py` — другие провайдеры по ключу (OpenAI, Gemini, OpenRouter, DeepSeek, Groq, Mistral, xAI, Ollama,
+    LM Studio, свой адрес): один клиент формата OpenAI Chat Completions на urllib (поток SSE), картинка — data:-URL
+    (без «зрения» не передаётся), `list_models`, `check`, `explain`; ключи — `workspace/api_keys.json`.
+    `S.backend`: subscription / api (Anthropic) / provider; история диалога для api и provider хранится в окне.
   - `materials.py` — извлечение текста и `Materials` (add/remove/text/clear), `material_terms` → hotwords.
   - `hotkeys.py` — `HotkeyManager` (хук pynput с `win32_event_filter`, сочетания с Ctrl/Alt/Shift, `capture_next`
     для переназначения нажатием), `problems` (повторы, буквы без модификатора, занятые клавиши).
   - `tray.py` — значок в трее (pystray), по умолчанию выключен.
-  - `ui_theme.py` — цвета тем (`T`), шрифты, значки Segoe Fluent Icons, свои элементы: `Button`, `IconButton`,
+  - `ui_theme.py` — 6 тем (`THEMES`: dark, midnight, black, warm, light, paper; внутри темы все цвета разные,
+    без чистых #ffffff/#000000), `apply_theme` — смена темы на лету: старые цвета → новые по ключам палитры во всех
+    окнах (виджеты, теги Text, элементы Canvas, свои элементы — `retheme`), формулы перерисовываются; шрифты, значки Segoe Fluent Icons, свои элементы: `Button`, `IconButton`,
     `Toggle`, `Slider`, `Choice` (ttk.Combobox), `ThinScroll`, `ScrollFrame`, `Meter`, `Tooltip`.
   - `ui_main.py` — `App`: главное окно и вся прежняя логика (команды, F7, материалы, «не листается само»),
     компактный режим, кнопки «Копировать», «↓ к последнему ответу», статус, `_on_settings` — применение настроек
@@ -115,6 +121,9 @@ claude -p --input-format stream-json --output-format stream-json --verbose --inc
   возвращает оверлей; ссылки «Копировать» привязываются к тегу один раз; F7 в режиме API — с инструкцией «Скажи:»;
   тайм-аут установщика — в фоновом потоке; `Удалить.bat` — ответы цифрами (Y/N не работают в русской раскладке),
   убирает только ярлыки своей папки.
+- **Тема меняется без перезапуска**: цвета в коде брать только из `T[...]`; свой элемент с рисованием — метод
+  `retheme(cmap)`; вопрос рисуется подложкой `Q_BG` (фон перевода строки тянется на всю ширину), разделитель —
+  тег `sep` с фоном `BORDER` и шрифтом 1 пт.
 - Пользователь — на Windows 11 (сборка 26200), NVIDIA RTX 3070 Ti 8 ГБ + CUDA, VB-Cable и Virtual Audio Cable
   (браузеры на «Chrome out»/«Edge out»), наушники JBL, рабочий стол перенаправлен в OneDrive (ярлыки — через
   `known_folder`).

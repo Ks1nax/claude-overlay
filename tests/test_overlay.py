@@ -346,6 +346,92 @@ def test_installer_progress_parsing():
     assert beats, "во время молчания установщика должен идти отсчёт «идёт установка… N с»"
 
 
+class FakeOpenAI:
+    """Поддельный сервис в формате OpenAI: потоковый ответ, список моделей, ошибки — как у настоящих."""
+
+    def __init__(self):
+        import http.server
+        fake = self
+        self.bodies, self.auth = [], []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _json(self, code, obj):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                fake.auth.append(self.headers.get("Authorization"))
+                self._json(200, {"data": [{"id": "m1"}, {"id": "models/m2"}]})
+
+            def do_POST(self):
+                fake.auth.append(self.headers.get("Authorization"))
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                fake.bodies.append(body)
+                if self.headers.get("Authorization") != "Bearer good-key":
+                    return self._json(401, {"error": {"message": "Incorrect API key provided"}})
+                if body["model"] == "bad":
+                    return self._json(404, {"error": {"message": "The model `bad` does not exist"}})
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for piece in ("**Скажи:** ", "Процесс — ", "программа."):
+                    ev = {"choices": [{"delta": {"content": piece}}]}
+                    self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+                    self.wfile.flush()
+                self.wfile.write(b": keep-alive\n\ndata: [DONE]\n\n")
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}/v1"
+
+
+@test
+def test_providers():
+    from app import providers as pv
+    fake = FakeOpenAI()
+    S.update(backend="provider", provider="custom", provider_base_url=fake.url, provider_model="m1",
+             provider_vision="yes")
+    assert pv.current()["model"] == "m1"
+    pv.save_key("custom", "good-key")
+    cfg = pv.current()
+    assert cfg["key"] == "good-key" and pv.problem(cfg) == ""
+    assert "good-key" not in open(os.path.join(WORKDIR, "settings.json"), encoding="utf-8").read()
+    assert pv.list_models(cfg) == ["m1", "m2"]
+    ok, msg = pv.check(cfg)
+    assert ok and msg.startswith("**Скажи:**"), msg
+    img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
+    msgs = [{"role": "user", "content": [img, {"type": "text", "text": "вопрос"}]}]
+    q, cancel = queue.Queue(), threading.Event()
+    pv.provider_ask(q, cfg, 7, "m1", "инструкция", msgs, cancel)
+    got = []
+    while not q.empty():
+        got.append(q.get())
+    assert got[-1] == ("done", 7) and "".join(m[2] for m in got if m[0] == "delta") == "**Скажи:** Процесс — программа."
+    sent = fake.bodies[-1]
+    assert sent["stream"] and sent["messages"][0] == {"role": "system", "content": "инструкция"}
+    assert sent["messages"][1]["content"][0]["image_url"]["url"] == "data:image/png;base64,QUJD"
+    S.update(provider_vision="no")                                    # модель без «зрения» — картинку не шлём
+    pv.provider_ask(q, pv.current(), 8, "m1", "", msgs, cancel)
+    assert isinstance(fake.bodies[-1]["messages"][0]["content"], str) and "не передан" in fake.bodies[-1]["messages"][0]["content"]
+    pv.provider_ask(q, pv.current(), 9, "bad", "", msgs, cancel)       # ошибки — понятным текстом
+    err = [m for m in list(q.queue) if m[0] == "error"][-1][2]
+    assert "404" in err and "Загрузить список" in pv.explain(err)
+    pv.save_key("custom", "wrong")
+    ok, msg = pv.check(pv.current())
+    assert not ok and "Ключ не подходит" in pv.explain(msg)
+    pv.save_key("custom", "")
+    for k in ("backend", "provider", "provider_base_url", "provider_model", "provider_vision"):
+        S.reset(k)
+    fake.srv.shutdown()
+
+
 @test
 def test_prompts():
     from app import prompts
@@ -601,6 +687,29 @@ def test_ui_main_window():
         pump(app, 0.8)
         assert app.root.winfo_height() > 150
         S.update(compact=False)
+        pump(app, 0.3)
+        # тема меняется сразу, без перезапуска
+        from app.ui_theme import THEMES
+        for th in ("light", "midnight", "dark"):
+            S.update(theme=th)
+            pump(app, 0.3)
+            assert app._head.cget("bg") == THEMES[th]["BG2"] and app.text.cget("bg") == THEMES[th]["BG"], th
+            assert app.text.tag_cget("user", "background") == THEMES[th]["Q_BG"]
+        # ответ через другого провайдера (поддельный сервис в формате OpenAI)
+        from app import providers as pv
+        fake = FakeOpenAI()
+        pv.save_key("custom", "good-key")
+        S.update(backend="provider", provider="custom", provider_base_url=fake.url, provider_model="m1")
+        pump(app, 0.3)
+        assert app.provider and not app.cli
+        app.on_heard("Клод, что такое поток")
+        pump(app, 1.5)
+        assert "Процесс — программа." in app.text.get("1.0", "end"), app.text.get("end-6l", "end")
+        assert any(p.get("type") == "image_url" for p in fake.bodies[-1]["messages"][-1]["content"])
+        for k in ("backend", "provider", "provider_base_url", "provider_model"):
+            S.reset(k)
+        pv.save_key("custom", "")
+        fake.srv.shutdown()
         pump(app, 0.3)
         # настройки на ходу
         S.update(font_size=13)

@@ -23,7 +23,7 @@ from .ui_theme import (T, F, MONO, Button, Toggle, Slider, Choice, Meter, Scroll
 TABS = [
     ("stt", "Распознавание речи", "mic"),
     ("sound", "Звук", "play"),
-    ("claude", "Claude", "help"),
+    ("claude", "Подключение к ИИ", "help"),
     ("keys", "Клавиши", "settings"),
     ("look", "Внешний вид", "eye"),
     ("materials", "Материалы", "attach"),
@@ -65,7 +65,12 @@ class NavItem(tk.Frame):
         self.icon.config(fg=T["ACCENT"] if cur else fg)
         self.text.config(fg=fg)
 
+    own_children = True
+
     def repaint(self):
+        self._paint()
+
+    def retheme(self, cmap):
         self._paint()
 
 
@@ -536,24 +541,17 @@ class SettingsWindow:
 
     # ------------------------------------------------------------ 3. Claude
     def _page_claude(self, p):
-        self._title(p, "Claude", "Через что и как отвечает Claude.")
+        self._title(p, "Подключение к ИИ", "Кто отвечает на вопросы: Claude по подписке, Claude по ключу или другой "
+                                            "провайдер (ChatGPT, Gemini, OpenRouter, DeepSeek, модель на своём компьютере…).")
         c = card(p, "Подключение")
-        Choice(row(c, "Способ"), [("subscription", "Подписка Pro/Max через Claude Code (без ключа)"),
-                                  ("api", "API-ключ (оплата за каждый запрос)")], S.backend,
-               lambda v: (S.update(backend=v), self._refresh_conn()), width=44).pack()
-        self.conn_lbl = label(c, "", muted=True, size=-1, wrap=640)
-        self.conn_lbl.pack(anchor="w", pady=(4, 4))
-        keyrow = row(c, "API-ключ", "Хранится в workspace\\api_key.txt, нигде не показывается")
-        self.key_entry = entry(keyrow, "", width=30, show="•")
-        self.key_entry.pack(side="left")
-        Button(keyrow, "Сохранить", self._save_key, small=True).pack(side="left", padx=4)
-        self.key_state = label(c, "", muted=True, size=-2)
-        self.key_state.pack(anchor="w")
-        Choice(row(c, "Модель для режима API-ключа"), API_MODELS, S.api_model,
-               lambda v: S.update(api_model=v)).pack()
-        self._refresh_conn()
-
-        c = card(p, "Модели и «сколько думать»")
+        Choice(row(c, "Способ"), [("subscription", "Claude по подписке Pro/Max (Claude Code, без ключа)"),
+                                  ("api", "Claude по API-ключу Anthropic"),
+                                  ("provider", "Другой провайдер по ключу (ChatGPT, Gemini…)")], S.backend,
+               lambda v: (S.update(backend=v), self._build_conn()), width=52).pack()
+        self.conn_box = tk.Frame(c, bg=T["BG2"])
+        self.conn_box.pack(fill="x")
+        self._build_conn()
+        c = card(p, "Claude: модели и «сколько думать»", "Для подписки и ключа Anthropic.")
         Choice(row(c, "«Клод, …» — модель"), CLAUDE_MODELS, S.cli_model, lambda v: S.update(cli_model=v),
                width=40).pack()
         Choice(row(c, "«Клод, …» — сколько думать"), EFFORTS, S.cli_effort, lambda v: S.update(cli_effort=v),
@@ -602,27 +600,155 @@ class SettingsWindow:
                                     ("prompt_analyze", "Когда добавлены материалы", lambda: ANALYZE_PROMPT)):
             self._prompt_editor(c, key, title, default)
 
-    def _refresh_conn(self):
-        if S.backend == "api":
-            key = load_api_key()
-            self.conn_lbl.config(text="Ответы через API-ключ — оплачивается каждый запрос." +
-                                      ("" if key else " Ключ не задан — впиши его ниже."))
-        else:
+    # --- подключение: содержимое зависит от способа
+    def _build_conn(self):
+        box = self.conn_box
+        for w in box.winfo_children():
+            w.destroy()
+        self.conn_lbl = label(box, "", muted=True, size=-1, wrap=640)
+        self.conn_lbl.pack(anchor="w", pady=(4, 4))
+        if S.backend == "subscription":
             cli = find_claude()
             self.conn_lbl.config(text=(f"Claude Code найден: {cli}" if cli else
                                        "Claude Code не найден — открой мастер (вкладка «Невидимость и система» → "
                                        "«Проверить и починить»)."))
-        self.key_state.config(text=("Ключ сохранён " + mask_secret(load_api_key())) if load_api_key() else
-                              "Ключ не задан")
-
-    def _save_key(self):
-        key = self.key_entry.get().strip()
-        save_api_key(key)
-        self.key_entry.delete(0, "end")
-        self._refresh_conn()
+            return
         if S.backend == "api":
-            self.app.ui_q.put(("settings_changed", {"backend"}))
+            self.conn_lbl.config(text="Ответы через API-ключ Anthropic — оплачивается каждый запрос.")
+            keyrow = row(box, "Ключ Anthropic", "Хранится в workspace\\api_key.txt, нигде не показывается")
+            ent = entry(keyrow, "", width=30, show="•")
+            ent.pack(side="left")
+            state = label(box, "", muted=True, size=-2)
 
+            def save():
+                save_api_key(ent.get().strip())
+                ent.delete(0, "end")
+                state.config(text="Ключ сохранён " + mask_secret(load_api_key()) if load_api_key() else "Ключ не задан")
+                self.app.ui_q.put(("settings_changed", {"api_key_saved"}))
+
+            Button(keyrow, "Сохранить", save, small=True).pack(side="left", padx=4)
+            state.pack(anchor="w")
+            state.config(text="Ключ сохранён " + mask_secret(load_api_key()) if load_api_key() else "Ключ не задан")
+            Choice(row(box, "Модель"), API_MODELS, S.api_model, lambda v: S.update(api_model=v)).pack()
+            return
+        self._build_provider(box)
+
+    def _build_provider(self, box):
+        from . import providers as pv
+        cfg = pv.current()
+        p = pv.BY_ID[cfg["id"]]
+        self.conn_lbl.config(text="Оплата — у выбранного провайдера, по его ценам. Скриншот уходит туда же, куда вопрос.")
+
+        def set_provider(v):
+            S.update(provider=v, provider_model="", provider_listen_model="", provider_base_url="",
+                     provider_vision="auto")
+            self._build_conn()
+
+        Choice(row(box, "Провайдер"), [(x.id, x.title) for x in pv.PROVIDERS], p.id, set_provider,
+               width=52).pack()
+        info = []
+        if p.note:
+            info.append(p.note)
+        if p.key_url:
+            info.append("где взять: " + p.key_url)
+        if info:
+            lnk = label(box, " · ".join(info), color=T["INFO"], size=-2, wrap=640, cursor=hand())
+            lnk.pack(anchor="w", pady=(0, 4))
+            if p.key_url:
+                lnk.bind("<Button-1>", lambda e: __import__("webbrowser").open(p.key_url))
+        r = row(box, "Адрес сервиса", "Обычно менять не нужно" if p.id != "custom" else
+                "Например http://localhost:8000/v1 — адрес, где есть /chat/completions")
+        url = entry(r, S.provider_base_url or p.base_url, width=36)
+        url.pack()
+
+        def save_url(_e=None):
+            v = url.get().strip()
+            S.update(provider_base_url="" if v == p.base_url else v)
+
+        url.bind("<Return>", save_url)
+        url.bind("<FocusOut>", save_url)
+        keyrow = row(box, "Ключ" + ("" if p.needs_key else " (не обязателен)"),
+                     "Хранится в workspace\\api_keys.json, нигде не показывается")
+        kent = entry(keyrow, "", width=30, show="•")
+        kent.pack(side="left")
+        kstate = label(box, "", muted=True, size=-2)
+
+        def show_key_state():
+            k = pv.load_key(p.id)
+            kstate.config(text=("Ключ сохранён " + mask_secret(k)) if k else
+                          ("Ключ не задан" + ("" if p.needs_key else " — для этого провайдера он и не нужен")))
+
+        def save_key():
+            pv.save_key(p.id, kent.get().strip())
+            kent.delete(0, "end")
+            show_key_state()
+            self.app.ui_q.put(("settings_changed", {"api_key_saved"}))
+
+        Button(keyrow, "Сохранить", save_key, small=True).pack(side="left", padx=4)
+        kstate.pack(anchor="w")
+        show_key_state()
+
+        models = [m for m in (cfg["model"], p.model) if m]
+        mrow = row(box, "Модель для «Клод, …»")
+        mbox = self._model_combo(mrow, S.provider_model or p.model, models, "provider_model", p.model)
+        frow = row(box, f"Модель для {key_display(S.hotkey_listen)}", "Пусто — та же; для F7 лучше быстрая")
+        fbox = self._model_combo(frow, S.provider_listen_model, models, "provider_listen_model", "")
+        Choice(row(box, "Модель видит картинки", "Если нет — скриншот не передаётся, отвечает по тексту"),
+               [("auto", "Как обычно у провайдера (" + ("да" if p.vision else "нет") + ")"), ("yes", "Да"),
+                ("no", "Нет")], S.provider_vision, lambda v: S.update(provider_vision=v), width=30).pack()
+        res = label(box, "", size=-1, wrap=640)
+        btns = tk.Frame(box, bg=T["BG2"])
+        btns.pack(anchor="w", pady=(6, 0))
+
+        def load_list():
+            res.config(text="Загружаю список моделей…", fg=T["MUTED"])
+
+            def work():
+                try:
+                    ids = pv.list_models(pv.current())
+                    msg, ok = f"Моделей: {len(ids)}. Выбери в списке «Модель».", True
+                except Exception as e:
+                    ids, msg, ok = [], f"Не получилось: {e}. " + pv.explain(str(e)), False
+
+                def ui():
+                    if ids:
+                        mbox.config(values=ids)
+                        fbox.config(values=[""] + ids)
+                    res.config(text=msg, fg=T["OK"] if ok else T["ERR"])
+                self.later(ui)
+            threading.Thread(target=work, daemon=True).start()
+
+        def check():
+            res.config(text="Отправляю пробный вопрос…", fg=T["MUTED"])
+
+            def work():
+                cfg2 = pv.current()
+                bad = pv.problem(cfg2)
+                ok, msg = (False, bad) if bad else pv.check(cfg2)
+                text = (f"✓ Работает: «{msg[:40]}» (модель {cfg2['model']})" if ok else
+                        f"✕ {msg[:300]}" + ("\n→ " + pv.explain(msg) if pv.explain(msg) else ""))
+                self.later(lambda: res.config(text=text, fg=T["OK"] if ok else T["ERR"]))
+            threading.Thread(target=work, daemon=True).start()
+
+        Button(btns, "Загрузить список моделей", load_list, small=True).pack(side="left")
+        Button(btns, "Проверить", check, small=True, kind="primary").pack(side="left", padx=6)
+        res.pack(anchor="w", pady=(6, 0))
+
+    def _model_combo(self, parent, value, values, key, default):
+        """Поле модели: можно выбрать из загруженного списка или вписать своё название."""
+        from tkinter import ttk
+        cb = ttk.Combobox(parent, values=values, width=34, font=F(0))
+        cb.set(value)
+        cb.pack()
+
+        def commit(_e=None):
+            v = cb.get().strip()
+            S.update(**{key: "" if v == default else v})
+
+        cb.bind("<<ComboboxSelected>>", commit)
+        cb.bind("<Return>", commit)
+        cb.bind("<FocusOut>", commit)
+        return cb
     def _prompt_editor(self, parent, key, title, default):
         box = tk.Frame(parent, bg=T["BG2"])
         box.pack(fill="x", pady=(8, 0))

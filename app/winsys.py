@@ -166,6 +166,22 @@ def ensure_tool_window(hwnd):
         user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0004 | 0x0010 | 0x0020)
 
 
+def style_frame(hwnd, border_hex=None, rounded=True):
+    """Windows 11: скруглённые углы (DWMWA_WINDOW_CORNER_PREFERENCE) и цвет тонкой рамки (DWMWA_BORDER_COLOR)."""
+    if not IS_WIN or not hwnd:
+        return
+    try:
+        dwm = ctypes.windll.dwmapi
+        pref = ctypes.c_int(2 if rounded else 1)          # DWMWCP_ROUND / DWMWCP_DONOTROUND
+        dwm.DwmSetWindowAttribute(wt.HWND(hwnd), 33, ctypes.byref(pref), ctypes.sizeof(pref))
+        if border_hex:
+            h = border_hex.lstrip("#")
+            colorref = ctypes.c_uint(int(h[4:6], 16) << 16 | int(h[2:4], 16) << 8 | int(h[0:2], 16))
+            dwm.DwmSetWindowAttribute(wt.HWND(hwnd), 34, ctypes.byref(colorref), ctypes.sizeof(colorref))
+    except Exception:
+        pass
+
+
 def is_tool_window(hwnd):
     if not IS_WIN or not hwnd:
         return False

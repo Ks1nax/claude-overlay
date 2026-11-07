@@ -92,7 +92,8 @@ def explain_error(text):
     if "401" in low or "invalid api key" in low or "authentication" in low or "oauth token" in low:
         return ("Claude Code не может войти (ошибка 401). Войди заново: мастер, шаг 1 → «Открыть окно входа». "
                 "Если не помогает — шаг «Конфликты настроек».")
-    if "usage limit" in low or "limit reached" in low or "rate limit" in low or "429" in low:
+    if "usage limit" in low or "limit reached" in low or "rate limit" in low or "session limit" in low \
+            or "hit your" in low and "limit" in low or "429" in low:
         return "Закончился лимит подписки на ближайшие часы. Подожди, пока он обновится (время — в сообщении выше)."
     if "credit balance" in low:
         return "На счёте API закончились деньги. Пополни баланс или переключись на подписку: ⚙ → Claude."

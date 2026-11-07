@@ -19,10 +19,11 @@ from .materials import Materials, extract_material, material_terms
 from .prompts import system_prompt, listen_prompt, analyze_prompt, MATERIALS_INTRO, FILE_IMAGE_RULE
 from .screen import grab_screen, encode_image
 from . import stt
+from . import providers
 from .textfmt import (MATH, CODE, md_segments, code_blocks, last_code_block, tex_rows, render_tex, warm_up_math,
                       split_wake, is_junk)
 from .ui_theme import (T, F, MONO, IS_WIN, IS_MAC, IconButton, ThinScroll, Tooltip, hand, text_cursor, init_fonts,
-                       state_color)
+                       state_color, apply_theme)
 
 HEADER_H = 38
 
@@ -188,7 +189,7 @@ class App:
         body.pack(fill="both", expand=True)
         self.text = tk.Text(body, wrap="word", bg=T["BG"], fg=T["FG"], bd=0, highlightthickness=0,
                             padx=14, pady=8, font=F(0), insertbackground=T["FG"], cursor=text_cursor(),
-                            selectbackground=T["SEL"], selectforeground=T["FG"], spacing1=1, spacing3=2)
+                            selectbackground=T["SEL"], selectforeground=T["FG"], spacing1=2, spacing2=2, spacing3=3)
         self.scroll = ThinScroll(body, self.text)
         self.text.configure(yscrollcommand=self.scroll.set)
         self.scroll.pack(side="right", fill="y", padx=(0, 2), pady=4)
@@ -235,13 +236,18 @@ class App:
             self._apply_compact()
         r.deiconify()
         self.guard.protect_tk(r)
+        self._window_frame()
         self._refresh_shield()
 
     def _config_tags(self):
         t = self.text
         t.configure(font=F(0))
-        t.tag_configure("user", foreground=T["ACCENT"], font=F(0, "bold"), spacing1=8)
-        t.tag_configure("liveq", foreground=T["TEAL"], font=F(0, "bold"), spacing1=8)
+        # вопрос — на подложке во всю ширину окна (фон перевода строки тянется до правого края)
+        t.tag_configure("user", foreground=T["ACCENT"], background=T["Q_BG"], font=F(0, "bold"), spacing1=6,
+                        spacing3=6, lmargin1=10, lmargin2=10, rmargin=10)
+        t.tag_configure("liveq", foreground=T["TEAL"], background=T["Q_BG"], font=F(0, "bold"), spacing1=6,
+                        spacing3=6, lmargin1=10, lmargin2=10, rmargin=10)
+        t.tag_configure("qpad", background=T["Q_BG"], font=F(-6))
         t.tag_configure("meta", foreground=T["MUTED"], font=F(-2))
         t.tag_configure("b", font=F(0, "bold"))
         t.tag_configure("h", font=F(1, "bold"), spacing1=6)
@@ -255,7 +261,8 @@ class App:
         t.tag_configure("dm", justify="center", spacing1=4, spacing3=4)
         t.tag_configure("err", foreground=T["ERR"])
         t.tag_configure("errhint", foreground=T["WARN"], font=F(-1))
-        t.tag_configure("sep", foreground=T["BORDER"], font=F(-4))
+        t.tag_configure("sep", background=T["BORDER"], font=(F()[0], 1), spacing1=0, spacing2=0, spacing3=0)
+        t.tag_configure("gap", font=(F()[0], 4), spacing1=0, spacing2=0, spacing3=0)
         t.tag_configure("helph", font=F(0, "bold"), foreground=T["ACCENT"], spacing1=6)
 
     def _update_hint(self):
@@ -382,12 +389,19 @@ class App:
             self.text.see("end")
 
     def _init_backend(self):
-        self.client = self.cli = None
+        self.client = self.cli = self.provider = None
+        if S.backend == "provider":
+            cfg = providers.current()
+            bad = providers.problem(cfg)
+            if bad:
+                return False, bad
+            self.provider = cfg
+            return True, ""
         if S.backend == "api":
             key = load_api_key()
             if not key:
-                return False, ("Нет API-ключа. Впиши его: ⚙ → Claude → «API-ключ», или переключись на подписку "
-                               "(Claude Code).")
+                return False, ("Нет API-ключа Anthropic. Впиши его: ⚙ → «Подключение к ИИ», или переключись "
+                               "на подписку (Claude Code).")
             try:
                 import anthropic
                 self.client = anthropic.Anthropic(api_key=key)
@@ -401,6 +415,11 @@ class App:
                            "и поможет войти.")
         os.makedirs(os.path.join(WORKDIR, "shots"), exist_ok=True)
         return True, ""
+
+    def _mode_name(self):
+        if self.provider:
+            return f"{self.provider['title'].split(' (')[0].split(' —')[0]} · {self.provider['model']}"
+        return "подписка (Claude Code)" if self.cli else "API-ключ Anthropic"
 
     def _write_prompts(self):
         """Инструкции для Claude (обычный режим и F7) — вместе с материалами пользователя, если они есть."""
@@ -430,7 +449,7 @@ class App:
             segs.append(("Совет: один раз проверь всё мастером — ⚙ → «Невидимость и система» → "
                          "«Проверить и починить».\n", ("meta",)))
         if backend_ok:
-            segs.append(("Режим: " + ("подписка (Claude Code)" if self.cli else "API-ключ")
+            segs.append(("Режим: " + self._mode_name()
                          + " · формулы: " + ("красивые" if S.math_render else "текстом")
                          + " · оформление: " + ("как в тетради" if S.student_style else "кратко") + "\n", ("meta",)))
         else:
@@ -517,9 +536,10 @@ class App:
         if not imgs:
             self.text.insert("end", tex if not display else tex.strip() + "\n", ("ic",))
             return
-        for img in imgs:
+        for i, img in enumerate(imgs):
             start = self.text.index("end-1c")
-            self.text.image_create("end", image=img, align="center", padx=1)
+            name = self.text.image_create("end", image=img, align="center", padx=1)
+            self.__dict__.setdefault("math_names", {})[name] = (tex, display, i)  # для перерисовки при смене темы
             if display:
                 self.text.insert("end", "\n")
                 self.text.tag_add("dm", start, "end-1c")
@@ -527,7 +547,11 @@ class App:
     def _begin_exchange(self, question, with_screen, live=False, icon="🎧"):
         self.ans_no += 1
         self.text.config(state="normal")
-        self.text.insert("end", "\n" + "─" * 60 + "\n", ("sep",))
+        if self.text.compare("end-1c", ">", "1.0"):
+            self.text.insert("end", "\n" if self.text.get("end-2c") != "\n" else "")
+            self.text.insert("end", "\n", ("gap",))
+            self.text.insert("end", " \n", ("sep",))  # тонкая линия во всю ширину между вопросами
+            self.text.insert("end", "\n", ("gap",))
         self.text.mark_set("q_start", "end-1c")
         self.text.mark_gravity("q_start", "left")
         if live:
@@ -536,6 +560,7 @@ class App:
             self.text.insert("end", "› " + question + "\n", ("user",))
         if not with_screen and not live:
             self.text.insert("end", "(без скриншота)\n", ("meta",))
+        self.text.insert("end", "\n", ("gap",))  # немного воздуха между вопросом и ответом
         self.text.mark_set("ans_start", "end-1c")
         self.text.mark_gravity("ans_start", "left")
         self.text.config(state="disabled")
@@ -802,7 +827,7 @@ class App:
     def ask(self, question, screen=True, prompt=None, listen=False, icon="🎧"):
         if self.busy:
             self.cancel(note="[прервано новым вопросом]")
-        if not self.client and not self.cli:
+        if not self.client and not self.cli and not self.provider:
             self._write([("\nНе настроено подключение к Claude (см. сообщение выше). Открой мастер: "
                           "⚙ → «Невидимость и система» → «Проверить и починить».\n", ("err",))])
             return
@@ -853,6 +878,13 @@ class App:
             args = (self.ui_q, self.cli, self.rid, content, self.session_id, self.session_gen, self.cancel_ev,
                     lambda p: setattr(self, "proc", p))
             threading.Thread(target=cli_ask, args=args, daemon=True).start()
+        elif self.provider:
+            self.history.append({"role": "user", "content": content})
+            system = self.api_listen_system if listen else self.api_system
+            model = self.provider["listen_model"] if listen else self.provider["model"]
+            threading.Thread(target=providers.provider_ask, args=(self.ui_q, self.provider, self.rid, model, system,
+                                                                  self._messages(), self.cancel_ev),
+                             daemon=True).start()
         else:
             self.history.append({"role": "user", "content": content})
             system = self.api_listen_system if listen else self.api_system
@@ -949,7 +981,7 @@ class App:
             self._write([("⧉ Копировать ответ\n", ("anslink", tag))], at_end=False)
             self._bind_link(tag, lambda a=answer: self._copy_text(a, "ответ"))
         if error:
-            hint = explain_error(error)
+            hint = (providers.explain(str(error)) if self.provider else "") or explain_error(error)
             print("[claude] ошибка:", error)
             self._write([(f"\nОшибка: {error}\n", ("err",))] + ([("→ " + hint + "\n", ("errhint",))] if hint else []))
             self.error_hint = "Ошибка — что делать, написано в окне"
@@ -1207,7 +1239,7 @@ class App:
         self.show()
         self._expand_for_answer()
         self.attach_busy += 1
-        cli = self.cli
+        cli = self.cli or find_claude()  # сканы и картинки читает Claude Code — даже если отвечает другой ИИ
 
         def work():
             added = 0
@@ -1277,7 +1309,7 @@ class App:
         if self.listen_tr:
             self.listen_tr.hotwords = self._hotwords()
         self._update_mat_bar()
-        if analyze and self.materials.items and (self.cli or self.client) and not self.busy:
+        if analyze and self.materials.items and (self.cli or self.client or self.provider) and not self.busy:
             titles = ", ".join(it["title"] for it in self.materials.items[-3:])
             self.ask("Материалы: " + titles, screen=False, prompt=analyze_prompt(), listen=True, icon="📎")
 
@@ -1406,14 +1438,15 @@ class App:
         if changed & {"listen_model", "listen_effort", "listen_max_turns"} and self.listen_session:
             self.listen_session.stop()
             self.listen_session = None
-        if changed & {"backend", "claude_cmd"}:
+        if changed & {"backend", "claude_cmd", "provider", "provider_base_url", "provider_model",
+                      "provider_listen_model", "provider_vision", "api_key_saved"}:
             ok, problem = self._init_backend()
             self.session_id = None
             self.session_gen += 1
             if self.listen_session:
                 self.listen_session.stop()
                 self.listen_session = None
-            self._write([(("Подключение к Claude: " + ("подписка (Claude Code)" if self.cli else "API-ключ") + "\n")
+            self._write([(("Подключение к ИИ: " + self._mode_name() + "\n")
                           if ok else ("\n" + problem + "\n"), ("meta",) if ok else ("err",))])
         if changed & {"hotkey_talk", "hotkey_toggle", "hotkey_listen"}:
             self.hk.set_binds(self._hotkey_actions())
@@ -1461,8 +1494,27 @@ class App:
         if changed & {"listen_hint", "materials_hotwords"} and self.listen_tr:
             self.listen_tr.hotwords = self._hotwords()
         if "theme" in changed:
-            self._write([("Тема поменяется после перезапуска оверлея (⚙ → Внешний вид → «Перезапустить»).\n",
-                          ("meta",))])
+            self.retheme()
+
+    def retheme(self):
+        """Новая тема — сразу во всех окнах, без перезапуска (формулы перерисовываются новыми цветами)."""
+        if not apply_theme(S.theme, self.root):
+            return
+        self._status_last = self._shield_last = None
+        self._refresh_status()
+        self.math_cache.clear()
+        names = getattr(self, "math_names", {})
+        for _key, name, index in self.text.dump("1.0", "end", image=True):
+            info = names.get(name)
+            imgs = self._math_image(info[0], info[1]) if info else None
+            if imgs and info[2] < len(imgs):
+                self.text.image_configure(index, image=imgs[info[2]])
+        self._window_frame()
+        print("[тема]", S.theme)
+
+    def _window_frame(self):
+        """Windows 11: скруглённые углы и тонкая рамка цвета темы (на старых Windows просто ничего не меняется)."""
+        winsys.style_frame(winsys.tk_hwnd(self.root), T["BORDER"])
 
     def restart_mic(self):
         if self.listener:

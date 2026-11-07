@@ -12,27 +12,42 @@ from .config import S
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 
+# Цвета тем. Внутри темы все значения разные (по ним при смене темы перекрашиваются окна), чистые #ffffff и
+# #000000 не используются — ими рисуются надписи на акцентных кнопках.
+_K = ("BG", "BG2", "BG3", "BG4", "FG", "MUTED", "FAINT", "ACCENT", "ACCENT2", "CODE_BG", "CODE_FG", "IC_FG", "ERR",
+      "OK", "WARN", "INFO", "BORDER", "SEL", "PURPLE", "TEAL", "REC", "Q_BG")
+
+
+def _theme(dark, *colors):
+    t = dict(zip(_K, colors))
+    t["DARK_TITLE"] = dark
+    return t
+
+
 THEMES = {
-    "dark": {"BG": "#16181d", "BG2": "#1e2128", "BG3": "#262a33", "BG4": "#30353f", "FG": "#e8e8e8",
-             "MUTED": "#8b919c", "FAINT": "#5c626d", "ACCENT": "#d97757", "ACCENT2": "#e8896a",
-             "CODE_BG": "#0c0e11", "CODE_FG": "#c8d3e0", "IC_FG": "#e5c07b", "ERR": "#ff6b6b", "OK": "#4cc38a",
-             "WARN": "#e5c07b", "INFO": "#61afef", "BORDER": "#2c3038", "SEL": "#3a3f4b", "PURPLE": "#b48cff",
-             "TEAL": "#56b6c2", "REC": "#e06c75", "DARK_TITLE": 1},
-    "black": {"BG": "#000000", "BG2": "#0e0f11", "BG3": "#1a1c20", "BG4": "#24272d", "FG": "#ececec",
-              "MUTED": "#8a8f98", "FAINT": "#55595f", "ACCENT": "#d97757", "ACCENT2": "#e8896a",
-              "CODE_BG": "#0b0c0e", "CODE_FG": "#c8d3e0", "IC_FG": "#e5c07b", "ERR": "#ff6b6b", "OK": "#4cc38a",
-              "WARN": "#e5c07b", "INFO": "#61afef", "BORDER": "#202227", "SEL": "#33373f", "PURPLE": "#b48cff",
-              "TEAL": "#56b6c2", "REC": "#e06c75", "DARK_TITLE": 1},
-    "light": {"BG": "#f7f7f5", "BG2": "#ebebe7", "BG3": "#ffffff", "BG4": "#e1e1dc", "FG": "#1d1f23",
-              "MUTED": "#666b74", "FAINT": "#9a9ea6", "ACCENT": "#c8603f", "ACCENT2": "#b5532f",
-              "CODE_BG": "#efefec", "CODE_FG": "#24292f", "IC_FG": "#9a5b00", "ERR": "#d32f2f", "OK": "#1e8e5a",
-              "WARN": "#a86b00", "INFO": "#1f6fd1", "BORDER": "#d6d6d0", "SEL": "#cfe0ff", "PURPLE": "#7c4dcc",
-              "TEAL": "#1b8a99", "REC": "#d0394a", "DARK_TITLE": 0},
+    "dark": _theme(1, "#17181c", "#1e2026", "#26282f", "#31343c", "#eceef2", "#9b9fa9", "#646872", "#e07a5a",
+                   "#ec8e70", "#111216", "#cdd6e4", "#f0c27a", "#ff7070", "#4fcb8f", "#e8b85c", "#6cb2ff",
+                   "#2c2e36", "#3a3e4a", "#b896ff", "#5cc3cf", "#ef6f7b", "#22242b"),
+    "midnight": _theme(1, "#0e1320", "#141a2a", "#1b2337", "#243048", "#e6ebf6", "#8e9ab4", "#586581", "#7aa2f7",
+                       "#93b4fa", "#0a0e18", "#c6d2ea", "#f2c97d", "#f7768e", "#73daca", "#e0af68", "#7dcfff",
+                       "#1f2740", "#2d3a5c", "#bb9af7", "#2ac3de", "#ff7a93", "#172036"),
+    "black": _theme(1, "#030303", "#0d0d0f", "#18191c", "#222428", "#f0f0f0", "#8d9098", "#55585f", "#e07a5b",
+                    "#ec8e71", "#0a0a0c", "#cfd6e2", "#f0c27b", "#ff7171", "#50cc90", "#e9b95d", "#6db3ff",
+                    "#1c1d21", "#33363e", "#b997ff", "#5dc4d0", "#f0707c", "#121315"),
+    "warm": _theme(1, "#1c1814", "#241f1a", "#2d2620", "#3a3129", "#f1e9df", "#a89a8a", "#6e6357", "#e8a253",
+                   "#f2b56d", "#15120e", "#e2d6c6", "#f4cf86", "#f2766b", "#8cc98a", "#e9be62", "#7fb8e6",
+                   "#322a23", "#4a3d31", "#c9a0e8", "#6fc2b4", "#ee7a6e", "#29231d"),
+    "light": _theme(0, "#fafaf8", "#f0efeb", "#fefefe", "#e4e3de", "#1c1d21", "#62666f", "#9b9ea6", "#c95f3d",
+                    "#b3502f", "#f2f2ef", "#24292f", "#9a5a00", "#d03434", "#1c8a57", "#a56a00", "#1f6bd0",
+                    "#dcdbd5", "#cfe0fd", "#7a4bcb", "#17899a", "#cd3a4b", "#f4efe9"),
+    "paper": _theme(0, "#f6f0e4", "#ece4d4", "#fbf7ef", "#e0d6c2", "#2b2419", "#6f6453", "#a69a85", "#b4562e",
+                    "#9c4724", "#efe7d6", "#2e2a22", "#8a5200", "#c0392b", "#2d7d46", "#9a6400", "#2b63b5",
+                    "#d9cdb6", "#e3d3b1", "#74479e", "#1d7f85", "#c23a3a", "#efe5d2"),
 }
-THEME_NAMES = {"dark": "Тёмная", "black": "Чёрная", "light": "Светлая"}
+THEME_NAMES = {"dark": "Графит (тёмная)", "midnight": "Полночь (тёмно-синяя)", "black": "Чёрная (для OLED)",
+               "warm": "Тёплая (тёмная, какао)", "light": "Светлая", "paper": "Бумага (светлая, тёплая)"}
 
-T = dict(THEMES.get(S.theme, THEMES["dark"]))   # тема меняется после перезапуска
-
+T = dict(THEMES.get(S.theme, THEMES["dark"]))   # словарь меняется на месте при смене темы (apply_theme)
 UI_FONT = "Segoe UI" if IS_WIN else ("Helvetica Neue" if IS_MAC else "DejaVu Sans")
 MONO_FONT = "Consolas" if IS_WIN else ("Menlo" if IS_MAC else "DejaVu Sans Mono")
 ICON_FONT = None
@@ -209,6 +224,10 @@ class IconButton(tk.Label):
     def set_glyph(self, name):
         self.config(text=glyph(name)[0])
 
+    def retheme(self, cmap):
+        self._bg, self._fg = remap(self._bg, cmap), remap(self._fg, cmap)
+        self.config(bg=self._bg, fg=self._fg)
+
     def _click(self, e):
         if 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height() and self.command:
             self.command()
@@ -270,6 +289,11 @@ class Button(tk.Canvas):
         self._hover = v and self.enabled
         self._draw()
 
+    def retheme(self, cmap):
+        self.parent_bg = remap(self.parent_bg, cmap)
+        self.config(bg=self.parent_bg)
+        self._draw()
+
     def _click(self, e):
         if self.enabled and self.command and 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height():
             self.command()
@@ -318,6 +342,10 @@ class Toggle(tk.Canvas):
 
     def set(self, v):
         self.value = bool(v)
+        self._draw()
+
+    def retheme(self, cmap):
+        self.config(bg=remap(self.cget("bg"), cmap))
         self._draw()
 
     def get(self):
@@ -380,6 +408,10 @@ class Slider(tk.Canvas):
 
     def set(self, v):
         self.value = v
+        self._draw()
+
+    def retheme(self, cmap):
+        self.config(bg=remap(self.cget("bg"), cmap))
         self._draw()
 
 
@@ -456,6 +488,10 @@ class ThinScroll(tk.Canvas):
 
     def set(self, first, last):
         self.first, self.last = float(first), float(last)
+        self._draw()
+
+    def retheme(self, cmap):
+        self.config(bg=remap(self.cget("bg"), cmap))
         self._draw()
 
     def _draw(self):
@@ -539,11 +575,94 @@ class Meter(tk.Canvas):
 
     def set(self, frac, color=None):
         frac = max(0.0, min(1.0, frac))
+        self._frac = frac
         self.delete("all")
         _round_rect(self, 0, 0, self.w, self.h, self.h / 2, fill=T["BG4"], outline=T["BG4"])
         if frac > 0.01:
             c = color or self.color or (T["OK"] if frac < 0.75 else T["WARN"] if frac < 0.92 else T["ERR"])
             _round_rect(self, 0, 0, max(self.h, self.w * frac), self.h, self.h / 2, fill=c, outline=c)
+
+    def retheme(self, cmap):
+        self.color = remap(self.color, cmap) if self.color else None
+        self.config(bg=remap(self.cget("bg"), cmap))
+        self.set(getattr(self, "_frac", 0))
+
+
+# ---------------------------------------------------------------- смена темы на лету
+
+_COLOR_OPTS = ("bg", "fg", "activebackground", "activeforeground", "highlightbackground", "highlightcolor",
+               "selectbackground", "selectforeground", "insertbackground", "selectcolor", "disabledbackground",
+               "disabledforeground", "troughcolor", "readonlybackground")
+_TAG_OPTS = ("foreground", "background", "selectbackground", "selectforeground", "lmargincolor", "rmargincolor")
+
+
+def remap(color, cmap):
+    if not isinstance(color, str):
+        return color
+    return cmap.get(color.lower(), color)
+
+
+def _recolor(w, cmap):
+    if hasattr(w, "retheme"):
+        try:
+            w.retheme(cmap)
+        except tk.TclError:
+            pass
+        if getattr(w, "own_children", False):  # сам перекрасил всё внутри
+            return
+    else:
+        for opt in _COLOR_OPTS:
+            try:
+                v = str(w.cget(opt))
+            except (tk.TclError, ValueError):
+                continue
+            nv = remap(v, cmap)
+            if nv != v:
+                try:
+                    w.configure(**{opt: nv})
+                except tk.TclError:
+                    pass
+        if isinstance(w, tk.Text):
+            for tag in w.tag_names():
+                for opt in _TAG_OPTS:
+                    try:
+                        v = str(w.tag_cget(tag, opt))
+                    except tk.TclError:
+                        continue
+                    nv = remap(v, cmap)
+                    if v and nv != v:
+                        w.tag_configure(tag, **{opt: nv})
+        elif isinstance(w, tk.Canvas):
+            for item in w.find_all():
+                for opt in ("fill", "outline"):
+                    try:
+                        v = str(w.itemcget(item, opt))
+                    except tk.TclError:
+                        continue
+                    nv = remap(v, cmap)
+                    if v and nv != v:
+                        w.itemconfigure(item, **{opt: nv})
+    for child in w.winfo_children():
+        _recolor(child, cmap)
+
+
+def apply_theme(name, root):
+    """Сменить тему сразу во всех открытых окнах программы: старые цвета → новые по ключам палитры."""
+    new = THEMES.get(name)
+    if not new or new == T:
+        return False
+    cmap = {T[k].lower(): new[k] for k in T if k != "DARK_TITLE" and isinstance(T[k], str)}
+    T.clear()
+    T.update(new)
+    setup_ttk(root)
+    _recolor(root, cmap)
+    for top in [root] + [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]:
+        try:
+            if top is not root and not top.overrideredirect():
+                dark_title_bar(top)
+        except tk.TclError:
+            pass
+    return True
 
 
 def label(parent, text, muted=False, size=0, bold=False, wrap=0, color=None, **kw):
