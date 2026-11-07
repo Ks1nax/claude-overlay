@@ -627,6 +627,12 @@ def test_ui_main_window():
     app = make_app()
     try:
         assert app.ready
+        assert app.text.get("1.0", "end").strip() == "", "при запуске окно должно быть пустым"
+        assert app.foot.winfo_ismapped(), "нижняя строка должна быть видна"
+        app.toggle_info()
+        assert app.info_win is not None
+        app.toggle_info()
+        assert app.info_win is None
         if winsys.IS_WIN:
             h = winsys.tk_hwnd(app.root)
             assert winsys.get_affinity(h) == winsys.WDA_EXCLUDEFROMCAPTURE, "окно должно быть невидимо для захвата"
@@ -715,7 +721,7 @@ def test_ui_main_window():
         S.update(font_size=13)
         S.update(hotkey_listen="<f6>")
         pump(app, 0.3)
-        assert app.hk.actions["listen"] == "<f6>" and "F6" in app.hint_lbl.cget("text")
+        assert app.hk.actions["listen"] == "<f6>"
         S.reset("font_size", "hotkey_listen")
         pump(app, 0.2)
     finally:

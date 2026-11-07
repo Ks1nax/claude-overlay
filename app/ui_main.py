@@ -100,8 +100,7 @@ class App:
 
         if self.materials.items:
             self._update_mat_bar()
-            self._write([("📎 Материалы с прошлого раза: " + self.materials.summary() + ". Убрать — «✕ убрать».\n",
-                          ("meta",))])
+            print("[материалы] с прошлого раза:", self.materials.summary())
         if S.math_render:
             threading.Thread(target=warm_up_math, args=(T["FG"], T["BG"]), daemon=True).start()
         self.transcriber = stt.Transcriber(self.audio_q, self.ui_q, self.models, self.listen_pause)
@@ -155,7 +154,7 @@ class App:
                 ("close", "close", self._quit, "Выход"),
                 ("hide", "hide", self.hide, f"Спрятать ({key_display(S.hotkey_toggle)})"),
                 ("compact", "compact", self.toggle_compact, "Компактно: только строка состояния"),
-                ("help", "help", self.open_help, "Справка: что можно сказать"),
+                ("help", "info", self.toggle_info, "Подсказки: что можно сказать и нажать"),
                 ("settings", "settings", self.open_settings, "Настройки"),
                 ("new", "new", self.reset, "Новая задача (очистить диалог)"),
                 ("paste", "paste", self.paste_material, "Материалы: текст из буфера (Ctrl+V)"),
@@ -188,7 +187,7 @@ class App:
         body = self.body = tk.Frame(outer, bg=T["BG"])
         body.pack(fill="both", expand=True)
         self.text = tk.Text(body, wrap="word", bg=T["BG"], fg=T["FG"], bd=0, highlightthickness=0,
-                            padx=14, pady=8, font=F(0), insertbackground=T["FG"], cursor=text_cursor(),
+                            padx=14, pady=8, font=F(0), insertbackground=T["FG"], cursor=text_cursor(), height=1,
                             selectbackground=T["SEL"], selectforeground=T["FG"], spacing1=2, spacing2=2, spacing3=3)
         self.scroll = ThinScroll(body, self.text)
         self.text.configure(yscrollcommand=self.scroll.set)
@@ -206,7 +205,7 @@ class App:
         self._down_shown = False
 
         foot = self.foot = tk.Frame(outer, bg=T["BG2"])
-        foot.pack(fill="x")
+        foot.pack(fill="x", side="bottom", before=body)  # нижняя строка всегда видна, ответ занимает остальное
         grip = tk.Label(foot, text="◢", bg=T["BG2"], fg=T["FAINT"], font=F(-2))
         grip.pack(side="right", anchor="se", padx=(2, 3))
         grip.bind("<ButtonPress-1>", self._resize_start)
@@ -217,11 +216,11 @@ class App:
         self.shield_lbl.pack(side="left", padx=(12, 6), pady=5)
         self.shield_lbl.bind("<Button-1>", lambda e: self.show_capture_check())
         Tooltip(self.shield_lbl, "Проверить: показать снимок экрана таким, каким его видят на демонстрации")
-        self.hint_lbl = tk.Label(foot, text="", bg=T["BG2"], fg=T["FAINT"], font=F(-2), anchor="e")
-        self.hint_lbl.pack(side="right", fill="x", expand=True, pady=5)
-        self._update_hint()
 
         r.protocol("WM_DELETE_WINDOW", self._quit)
+        # щелчок где угодно в окне (кроме самой кнопки «i») прячет подсказку
+        r.bind("<ButtonPress-1>", lambda e: self.toggle_info() if getattr(self, "info_win", None) is not None
+               and e.widget is not self.icons["help"] else None, add="+")
         # Ctrl+V в окне — текст из буфера в материалы (по коду клавиши: работает и в русской раскладке)
         r.bind("<Control-KeyPress>", self._on_ctrl_key)
         self._setup_drop()
@@ -266,7 +265,8 @@ class App:
         t.tag_configure("helph", font=F(0, "bold"), foreground=T["ACCENT"], spacing1=6)
 
     def _update_hint(self):
-        self.hint_lbl.config(text=f"«Клод, …» · {key_display(S.hotkey_listen)} — вопрос с компьютера · ? — справка")
+        if getattr(self, "info_win", None) is not None:  # клавиши поменялись — подсказка перерисуется
+            self.toggle_info()
 
     def _place_window(self):
         r = self.root
@@ -366,9 +366,9 @@ class App:
             r.geometry(f"{width}x{HEADER_H + 2}")
             self.icons["compact"].set_glyph("expand")
         else:
+            self.foot.pack(fill="x", side="bottom")
             self.heard_lbl.pack(fill="x", padx=14, pady=(6, 0))
             self.body.pack(fill="both", expand=True)
-            self.foot.pack(fill="x")
             self._update_mat_bar()
             r.geometry(f"{width}x{max(220, int(self._full_h))}")
             self.icons["compact"].set_glyph("compact")
@@ -437,25 +437,10 @@ class App:
             f.write(listen_prompt() + extra)
 
     def _welcome(self, backend_ok, problem):
-        k = key_display(S.hotkey_listen)
-        segs = [("Привет! Я слушаю микрофон.\n", ("h",)),
-                ("Скажи «Клод, …» и вопрос — сделаю скриншот экрана под курсором и отвечу здесь. "
-                 "Следующие «Клод, …» продолжают тот же диалог. ", ()),
-                (f"{S.followup_seconds} с после ответа можно дополнять без «Клод».\n"
-                 if S.followup_seconds else "\n", ("meta",)),
-                (f"{k} — вопрос со звука компьютера (лекция, созвон, видео): нажми в начале вопроса и ещё раз в конце. "
-                 "Esc — отменить запись. 📎 / 📋 / перетащить файл — материалы. ? — вся справка.\n", ("meta",))]
-        if not os.path.isfile(SETUP_STATE_PATH):
-            segs.append(("Совет: один раз проверь всё мастером — ⚙ → «Невидимость и система» → "
-                         "«Проверить и починить».\n", ("meta",)))
-        if backend_ok:
-            segs.append(("Режим: " + self._mode_name()
-                         + " · формулы: " + ("красивые" if S.math_render else "текстом")
-                         + " · оформление: " + ("как в тетради" if S.student_style else "кратко") + "\n", ("meta",)))
-        else:
-            segs.append(("\n" + problem + "\n", ("err",)))
-        self._write(segs)
-
+        """Окно при запуске пустое — подсказки по кнопке «i» в заголовке. Здесь только то, что мешает работать."""
+        print("[запуск] режим:", self._mode_name() if backend_ok else "не настроен")
+        if not backend_ok:
+            self._write([(problem + "\n", ("err",))])
     def _render_answer(self, final=False):
         # Пока пользователь не листал сам — держим вопрос в самом верху окна: ответ дописывается ниже
         # и ничего не прыгает. Если листал — оставляем окно ровно там, где он читает.
@@ -1112,12 +1097,13 @@ class App:
                 self.set_state("download", f"⬇ Скачиваю модель распознавания команд: {self.download_info}")
             return
         if state == "loading":
-            self._write([(f"🎙 Команды: загружаю модель {info}…\n", ("meta",))])
+            print(f"[whisper] команды: загружаю {info}")
         elif state == "ready":
             self.download_info = ""
             self.mic_model_info = info
-            if self.ready:
-                self._write([(f"🎙 Команды: распознаёт {info}.\n", ("meta",))])
+            if self.ready and getattr(self, "_mic_model_switch_shown", False):
+                self._write([(f"🎙 Команды: теперь распознаёт {info}.\n", ("meta",))])
+            self._mic_model_switch_shown = True
         elif state == "error":
             self.download_info = ""
             self._write([(f"🎙 Модель для команд не загрузилась ({info}) — осталась прежняя.\n", ("err",))])
@@ -1147,7 +1133,7 @@ class App:
             return
         self.listen_model_state = (state, info)
         if state == "ready":
-            self._write([(f"🎧 {key_display(S.hotkey_listen)}: распознавание звука компьютера — {info}.\n", ("meta",))])
+            print(f"[whisper] звук компьютера готов: {info}")
         elif state == "fallback":
             self._write([(f"🎧 Точная модель не загрузилась ({info}) — будет модель микрофона.\n", ("err",))])
         elif state == "error":
@@ -1160,7 +1146,7 @@ class App:
         if sa.state == "ok" and not self._sys_announced:
             self._sys_announced = True
             main = f" (основное: {sa.default_name.replace(' [Loopback]', '')})" if sa.default_name else ""
-            self._write([(f"🎧 Звук компьютера: слушаю устройств — {len(sa.devices)}{main}.\n", ("meta",))])
+            print(f"[звук] слушаю устройств: {len(sa.devices)}{main}")
         elif sa.state == "error" and not self._sys_err_shown:
             self._sys_err_shown = True
             self._write([("\n🎧 " + sa.error + "\n", ("err",))])
@@ -1387,7 +1373,9 @@ class App:
         shot, rect = winsys.grab_monitor_of(hwnd)
         seen = winsys.region_looks_like(shot, rect, [T["BG"], T["BG2"]]) if self.visible else 0.0
         level, status = self.guard.status(self.root)
-        ok = level == "ok" and seen < 0.5
+        # решает защита окна (Windows сама сообщает, что окно исключено из захвата); сравнение цветов —
+        # только для журнала: на тёмном фоне за окном оно давало ложную тревогу
+        ok = level == "ok"
         print(f"[невидимость] проверка: {status}; доля цветов окна в снимке {seen:.2f}")
         if ok:
             msg = ("✓ Окна оверлея на снимке нет. Так тебя видят в Zoom, Teams, Discord, Google Meet, OBS и на "
@@ -1408,6 +1396,68 @@ class App:
             self.settings_win.focus(tab)
             return
         self.settings_win = SettingsWindow(self, tab)
+
+    def toggle_info(self):
+        """Кнопка «i»: короткая подсказка выпадает под заголовком; повторное нажатие (или щелчок в окне) прячет."""
+        win = getattr(self, "info_win", None)
+        if win is not None:
+            self.info_win = None
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+            return
+        k, t8, t9 = key_display(S.hotkey_listen), key_display(S.hotkey_talk), key_display(S.hotkey_toggle)
+        rows = [("«Клод, …»", "вопрос по экрану: сделаю скриншот под курсором и отвечу"),
+                ("«Клод, дополни…»", f"тот же диалог; {S.followup_seconds} с после ответа можно без «Клод»"
+                 if S.followup_seconds else "тот же диалог продолжается"),
+                ("«Клод, новая задача»", "очистить диалог · «стоп» · «скопируй код» · «скрой»"),
+                (k, "вопрос со звука компьютера (лекция, созвон): нажми в начале и в конце · Esc — отмена"),
+                (t8, "следующая фраза — команда без «Клод»"),
+                (t9, "спрятать / показать окно"),
+                ("📎  📋", "материалы: файлы, текст из буфера или перетащи файл в окно")]
+        w = self.info_win = tk.Toplevel(self.root)
+        w.withdraw()
+        if IS_WIN:
+            w.attributes("-toolwindow", True)
+        w.overrideredirect(True)
+        w.attributes("-topmost", True)
+        w.configure(bg=T["BORDER"])
+        box = tk.Frame(w, bg=T["BG3"])
+        box.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Label(box, text="Как пользоваться", bg=T["BG3"], fg=T["FG"], font=F(1, "bold"), anchor="w").pack(
+            fill="x", padx=14, pady=(12, 6))
+        width = max(300, self.root.winfo_width() - 24)
+        for key, what in rows:
+            r = tk.Frame(box, bg=T["BG3"])
+            r.pack(fill="x", padx=14, pady=2)
+            tk.Label(r, text=key, bg=T["BG3"], fg=T["ACCENT"], font=F(-1, "bold"), anchor="nw", width=17,
+                     justify="left").pack(side="left", anchor="n")
+            tk.Label(r, text=what, bg=T["BG3"], fg=T["FG"], font=F(-1), anchor="w", justify="left",
+                     wraplength=width - 190).pack(side="left", fill="x", expand=True)
+        notes = [f"Отвечает: {self._mode_name()}" if (self.cli or self.client or self.provider) else ""]
+        if not os.path.isfile(SETUP_STATE_PATH):
+            notes.append("Совет: один раз проверь всё мастером — ⚙ → «Невидимость и система» → «Проверить и починить».")
+        for n in filter(None, notes):
+            tk.Label(box, text=n, bg=T["BG3"], fg=T["MUTED"], font=F(-2), anchor="w", justify="left",
+                     wraplength=width - 30).pack(fill="x", padx=14, pady=(6, 0))
+        foot = tk.Frame(box, bg=T["BG3"])
+        foot.pack(fill="x", padx=14, pady=(10, 12))
+        more = tk.Label(foot, text="Вся справка →", bg=T["BG3"], fg=T["INFO"], font=F(-1), cursor=hand())
+        more.pack(side="left")
+        more.bind("<Button-1>", lambda e: (self.toggle_info(), self.open_help()))
+        close = tk.Label(foot, text="Понятно", bg=T["BG3"], fg=T["MUTED"], font=F(-1), cursor=hand())
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda e: self.toggle_info())
+        w.bind("<Escape>", lambda e: self.toggle_info())
+        w.update_idletasks()
+        x = self.root.winfo_x() + 12
+        y = self.root.winfo_y() + HEADER_H + 4
+        w.geometry(f"{width}x{w.winfo_reqheight()}+{x}+{y}")
+        self.guard.protect_tk(w)
+        w.deiconify()
+        self.guard.protect_tk(w)
+        winsys.style_frame(winsys.tk_hwnd(w), T["BORDER"])
 
     def open_help(self):
         from .ui_dialogs import show_help
@@ -1469,7 +1519,7 @@ class App:
             self._config_tags()
             for w in (self.status_lbl,):
                 w.config(font=F(-1))
-            for w in (self.heard_lbl, self.mat_lbl, self.shield_lbl, self.hint_lbl):
+            for w in (self.heard_lbl, self.mat_lbl, self.shield_lbl):
                 w.config(font=F(-2))
             self.math_cache.clear()
         if "compact" in changed:

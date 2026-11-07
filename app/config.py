@@ -30,7 +30,7 @@ DEFAULTS = {
     # --- Claude ---
     "backend": "subscription",        # "subscription" — Claude Code по подписке Pro/Max; "api" — ключ Anthropic;
                                       # "provider" — другой провайдер по ключу (OpenAI, Gemini, OpenRouter, Ollama…)
-    "provider": "openai",             # какой провайдер (app/providers.py)
+    "provider": "openrouter",         # какой провайдер (app/providers.py)
     "provider_base_url": "",          # свой адрес сервиса ("" — стандартный для провайдера)
     "provider_model": "",             # модель для «Клод, …» ("" — по умолчанию у провайдера)
     "provider_listen_model": "",      # модель для F7 ("" — та же)

@@ -26,24 +26,47 @@ class Provider:
 
 # Модели по умолчанию — разумный старт; список моделей провайдера загружается кнопкой «Загрузить список».
 PROVIDERS = [
-    Provider("openai", "OpenAI (ChatGPT)", "https://api.openai.com/v1", "gpt-4.1-mini", "gpt-4.1-mini",
-             "https://platform.openai.com/api-keys", True, True, "OPENAI_API_KEY"),
+    # --- самые популярные
+    Provider("openrouter", "OpenRouter — сотни моделей по одному ключу (Claude, GPT, Gemini, Llama…)",
+             "https://openrouter.ai/api/v1", "openai/gpt-4.1-mini", "openai/gpt-4.1-mini",
+             "https://openrouter.ai/keys", True, True, "OPENROUTER_API_KEY",
+             "есть бесплатные модели (с «:free» в названии)"),
     Provider("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai",
              "gemini-2.5-flash", "gemini-2.5-flash", "https://aistudio.google.com/apikey", True, True,
              "GEMINI_API_KEY", "есть бесплатный уровень"),
-    Provider("openrouter", "OpenRouter (сотни моделей по одному ключу)", "https://openrouter.ai/api/v1",
-             "openai/gpt-4.1-mini", "openai/gpt-4.1-mini", "https://openrouter.ai/keys", True, True,
-             "OPENROUTER_API_KEY"),
+    Provider("openai", "OpenAI (ChatGPT)", "https://api.openai.com/v1", "gpt-4.1-mini", "gpt-4.1-mini",
+             "https://platform.openai.com/api-keys", True, True, "OPENAI_API_KEY"),
     Provider("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", "deepseek-chat",
              "https://platform.deepseek.com/api_keys", False, True, "DEEPSEEK_API_KEY",
              "не видит картинки — скриншот не передаётся"),
-    Provider("groq", "Groq (очень быстрые ответы)", "https://api.groq.com/openai/v1",
+    Provider("groq", "Groq — очень быстрые ответы", "https://api.groq.com/openai/v1",
              "meta-llama/llama-4-scout-17b-16e-instruct", "meta-llama/llama-4-scout-17b-16e-instruct",
              "https://console.groq.com/keys", True, True, "GROQ_API_KEY", "есть бесплатный уровень"),
     Provider("mistral", "Mistral", "https://api.mistral.ai/v1", "mistral-small-latest", "mistral-small-latest",
-             "https://console.mistral.ai/api-keys", True, True, "MISTRAL_API_KEY"),
+             "https://console.mistral.ai/api-keys", True, True, "MISTRAL_API_KEY", "есть бесплатный уровень"),
     Provider("xai", "xAI (Grok)", "https://api.x.ai/v1", "grok-3-mini", "grok-3-mini",
              "https://console.x.ai", False, True, "XAI_API_KEY"),
+    Provider("perplexity", "Perplexity — ответы с поиском в интернете", "https://api.perplexity.ai", "sonar",
+             "sonar", "https://www.perplexity.ai/settings/api", False, True, "PERPLEXITY_API_KEY",
+             "список моделей не отдаёт — впиши название: sonar, sonar-pro"),
+    Provider("qwen", "Qwen (Alibaba Cloud)", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+             "qwen-vl-plus", "qwen-plus", "https://modelstudio.console.alibabacloud.com", True, True,
+             "DASHSCOPE_API_KEY"),
+    Provider("moonshot", "Kimi (Moonshot AI)", "https://api.moonshot.ai/v1", "moonshot-v1-8k", "moonshot-v1-8k",
+             "https://platform.moonshot.ai/console/api-keys", False, True, "MOONSHOT_API_KEY"),
+    Provider("together", "Together AI — открытые модели", "https://api.together.xyz/v1",
+             "meta-llama/Llama-3.3-70B-Instruct-Turbo", "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+             "https://api.together.ai/settings/api-keys", False, True, "TOGETHER_API_KEY"),
+    Provider("fireworks", "Fireworks AI — открытые модели", "https://api.fireworks.ai/inference/v1",
+             "accounts/fireworks/models/llama-v3p3-70b-instruct", "accounts/fireworks/models/llama-v3p3-70b-instruct",
+             "https://fireworks.ai/account/api-keys", False, True, "FIREWORKS_API_KEY"),
+    Provider("cerebras", "Cerebras — самые быстрые ответы", "https://api.cerebras.ai/v1", "llama-3.3-70b",
+             "llama-3.3-70b", "https://cloud.cerebras.ai", False, True, "CEREBRAS_API_KEY",
+             "есть бесплатный уровень; картинки не видит"),
+    Provider("yandex", "YandexGPT (Yandex Cloud)", "https://llm.api.cloud.yandex.net/v1", "", "",
+             "https://yandex.cloud/ru/docs/foundation-models/quickstart", False, True, "YANDEX_API_KEY",
+             "модель вписывается так: gpt://ID-каталога/yandexgpt/latest"),
+    # --- на своём компьютере
     Provider("ollama", "Ollama — модель на этом компьютере (без интернета)", "http://localhost:11434/v1",
              "llama3.2-vision", "llama3.2-vision", "https://ollama.com/download", True, False, "",
              "ключ не нужен; модель скачай в Ollama заранее"),
@@ -97,12 +120,13 @@ def save_key(pid, key):
 
 def current():
     """→ словарь с тем, что выбрано в ⚙: id, title, base_url, model, listen_model, vision, key."""
-    p = BY_ID.get(S.provider) or BY_ID["openai"]
+    p = BY_ID.get(S.provider) or BY_ID["openrouter"]
     base = (S.provider_base_url or "").strip() or p.base_url
     model = (S.provider_model or "").strip() or p.model
     listen = (S.provider_listen_model or "").strip() or model
     vision = {"yes": True, "no": False}.get(S.provider_vision, p.vision)  # "auto" — как у провайдера
-    return {"id": p.id, "title": p.title, "base_url": base.rstrip("/"), "model": model, "listen_model": listen,
+    short = p.title.split(" —")[0].split(" (")[0]
+    return {"id": p.id, "title": short, "full_title": p.title, "base_url": base.rstrip("/"), "model": model, "listen_model": listen,
             "vision": bool(vision), "key": load_key(p.id), "needs_key": p.needs_key}
 
 

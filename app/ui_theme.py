@@ -55,7 +55,7 @@ ICON_FONT = None
 # Значки Segoe Fluent Icons / Segoe MDL2 Assets; запасной вариант — обычные символы
 GLYPHS = {
     "settings": ("", "⚙"), "attach": ("", "📎"), "paste": ("", "📋"), "new": ("", "⟲"),
-    "hide": ("", "—"), "close": ("", "✕"), "help": ("", "?"), "compact": ("", "▭"),
+    "hide": ("", "—"), "close": ("", "✕"), "help": ("", "?"), "info": ("", "ⓘ"), "compact": ("", "▭"),
     "expand": ("", "▢"), "copy": ("", "⧉"), "down": ("", "↓"), "shield": ("", "🛡"),
     "mic": ("", "🎙"), "check": ("", "✓"), "warn": ("", "⚠"), "play": ("", "▶"),
     "delete": ("", "🗑"), "download": ("", "⬇"), "folder": ("", "📁"), "eye": ("", "👁"),
