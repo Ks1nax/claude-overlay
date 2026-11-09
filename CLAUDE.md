@@ -70,7 +70,14 @@
   - `ui_settings.py` — окно настроек (7 вкладок), `ui_wizard.py` — мастер (7 шагов, `workspace/setup_state.json`),
     `ui_dialogs.py` — проверка невидимости, справка, просмотр текста, `setup_tools.py` — ярлыки, автозапуск,
     установка Claude Code (winget → install.ps1), npm-копия, конфликты настроек (с резервными копиями).
-- `Установить.bat` (Python 3.10–3.14 через py/известные папки → winget → python.org; `.venv`; библиотеки; мастер),
+- `setup/` — установка: `install.ps1` (общая для EXE и .bat: Python 3.10–3.14 ищется через реестр Windows, лаунчер
+  py, привычные папки; без tcl/tk не подходит; нет подходящего — качает с python.org и ставит отдельный
+  `…\Python312_ClaudeOverlay` без прав администратора; `.venv`; библиотеки; служебные строки `@@ШАГ` для EXE),
+  `ClaudeOverlay.iss` (Inno Setup 6: выбор папки, значок на столе, автозапуск, страница прогресса через
+  `ExecAndLogOutput`, удаление с вопросами про workspace и модели, длинные пути — `rmdir \\?\`), `build.bat` (сборка
+  → `Zip\ClaudeOverlay-Setup-<версия>.exe`), `make_art.py` (значки и аватарка `branding/telegram_avatar_1024.png`),
+  `make_zip.py`, `make_bats.py`. Версия — `app/__init__.py: VERSION`.
+- `Установить.bat` (обёртка над `setup\install.ps1` → мастер),
   `Удалить.bat`, `start.bat` (запуск с консолью для отладки), `requirements.txt`, `README.md`,
   `КАК ЗАПУСТИТЬ.txt`, `Промпт для конспекта.txt`, `tests/test_overlay.py`.
 - `workspace/` — рабочая папка (настройки, материалы, журнал, инструкции Claude, `gpu_ok.txt`/`gpu_fail.txt`).
@@ -156,6 +163,12 @@ claude -p --input-format stream-json --output-format stream-json --verbose --inc
 - Остановка потока PortAudio ждёт конца обработчика звука: нельзя держать `SystemAudio.lock` во время `stop_stream`.
 - Venv-лаунчер `Scripts\python(w).exe` запускает дочерний процесс базового Python — PID окна ≠ PID лаунчера.
 - Инструмент скриншотов computer-use сворачивает окна не из списка разрешённых — не путать с багом программы.
+- Баг друга (2.3): .bat не находил стоящий Python 3.12 — путь с русскими буквами приходил из Python в другой
+  кодировке. Поэтому установка — PowerShell + реестр. В PowerShell 5.1 нельзя `& python ... | Select-Object -First 1`:
+  обрывает программу, код −1. Скрипты .ps1 — в UTF-8 с BOM (иначе 5.1 читает русский как ANSI).
+- Проверка EXE: тихо `/VERYSILENT /DIR=… /TASKS=""` во временную папку → `unins000.exe /VERYSILENT`; ярлык
+  «Пуска» с тем же именем у пользователя — сохранить и вернуть; оверлей пользователя может работать — не слать ему
+  Quit (тестовая копия просто «будит» его и выходит).
 - **Не проигрывать тестовый звук в VB-Cable, когда пользователь в звонке**: «CABLE Output» может быть микрофоном
   в Discord/Zoom. Для проверки распознавания — wav-файлы (тесты `--whisper`).
 
