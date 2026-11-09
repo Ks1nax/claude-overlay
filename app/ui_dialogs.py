@@ -178,7 +178,7 @@ def show_history(app):
     from tkinter import filedialog, messagebox
     from . import history
     from .config import S
-    from .textfmt import md_segments, MATH, CODE
+    from .textfmt import md_segments, MATH, CODE, tex_to_text
     if getattr(app, "history_win", None) is not None:
         try:
             app.history_win.deiconify()
@@ -230,6 +230,7 @@ def show_history(app):
     t.tag_configure("code", font=MONO(-1), background=T["CODE_BG"], foreground=T["CODE_FG"], lmargin1=10,
                     lmargin2=10)
     t.tag_configure("err", foreground=T["ERR"])
+    t.tag_configure("mf", font=(F()[0], S.font_size + 1, "italic"))
     foot = tk.Frame(top, bg=T["BG2"])
     foot.pack(fill="x")
     state = {"items": [], "cur": None}
@@ -245,7 +246,7 @@ def show_history(app):
         t.insert("end", "\n")
         for s, tags in md_segments(rec.get("a", "")):
             if s == MATH:
-                t.insert("end", tags[0] + ("\n" if tags[1] else ""), ("ic",))
+                t.insert("end", tex_to_text(tags[0]) + ("\n" if tags[1] else ""), ("mf",))
             elif s != CODE:
                 t.insert("end", s, tags)
         if rec.get("error"):

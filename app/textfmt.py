@@ -185,9 +185,69 @@ _TEX_SUBS = [
 ]
 
 
+# команды, у которых Claude иногда опускает фигурные скобки: \frac52, \sqrt2 — LaTeX это понимает, matplotlib нет
+_ARG_CMDS = {"frac": 2, "dfrac": 2, "tfrac": 2, "cfrac": 2, "binom": 2, "dbinom": 2, "tbinom": 2, "sqrt": 1}
+
+
+def _group_end(t, i):
+    """t[i] == "{" → индекс парной «}» (или len(t), если её нет)."""
+    depth = 0
+    j = i
+    while j < len(t):
+        if t[j] == "\\":
+            j += 2
+            continue
+        if t[j] == "{":
+            depth += 1
+        elif t[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return len(t)
+
+
+def fix_shorthand(t):
+    """\\frac52 → \\frac{5}{2}, \\sqrt2 → \\sqrt{2}, \\frac\\pi2 → \\frac{\\pi}{2} (в том числе внутри других скобок)."""
+    out, i, n = [], 0, len(t)
+    while i < n:
+        m = re.match(r"\\([a-zA-Z]+)", t[i:])
+        if not m:
+            out.append(t[i])
+            i += 1
+            continue
+        name = m.group(1)
+        out.append(m.group(0))
+        i += len(m.group(0))
+        if name not in _ARG_CMDS:
+            continue
+        if name == "sqrt" and i < n and t[i] == "[":   # \sqrt[3]{8}
+            j = t.find("]", i)
+            j = n - 1 if j < 0 else j
+            out.append(t[i:j + 1])
+            i = j + 1
+        for _ in range(_ARG_CMDS[name]):
+            while i < n and t[i] == " ":
+                i += 1
+            if i >= n:
+                break
+            if t[i] == "{":
+                j = _group_end(t, i)
+                out.append("{" + fix_shorthand(t[i + 1:j]) + "}")
+                i = j + 1
+            elif t[i] == "\\":
+                a = re.match(r"\\([a-zA-Z]+|.)", t[i:]).group(0)
+                out.append("{" + a + "}")
+                i += len(a)
+            else:
+                out.append("{" + t[i] + "}")
+                i += 1
+    return "".join(out)
+
+
 def tex_rows(tex, display):
     """Подгоняет LaTeX под то, что умеет matplotlib; многострочные формулы режет на строки."""
-    t = tex.strip()
+    t = fix_shorthand(tex.strip())
     for pat, rep in _TEX_SUBS:
         t = re.sub(pat, rep, t)
     rows = [r.replace("&", " ").strip() for r in re.split(r"\\\\", t)] if display else [t.replace("\\\\", " ")]
@@ -219,3 +279,102 @@ def warm_up_math(fg="#e8e8e8", bg="#16181d"):
         render_tex(r"\frac{1}{2}", 12, 96, fg, bg)
     except Exception as e:
         print("[math] формулы будут текстом:", e)
+
+
+# ---------------------------------------------------------------- запасной вид формулы (если не нарисовалась)
+
+_SYMBOLS = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ",
+    "eta": "η", "theta": "θ", "vartheta": "ϑ", "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν",
+    "xi": "ξ", "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ", "varphi": "φ",
+    "chi": "χ", "psi": "ψ", "omega": "ω", "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ",
+    "Pi": "Π", "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+    "cdot": "·", "times": "×", "div": "÷", "pm": "±", "mp": "∓", "le": "≤", "leq": "≤", "leqslant": "≤",
+    "ge": "≥", "geq": "≥", "geqslant": "≥", "ne": "≠", "neq": "≠", "approx": "≈", "equiv": "≡", "sim": "~",
+    "infty": "∞", "to": "→", "rightarrow": "→", "Rightarrow": "⇒", "leftarrow": "←", "Leftrightarrow": "⇔",
+    "iff": "⇔", "implies": "⇒", "in": "∈", "notin": "∉", "subset": "⊂", "cup": "∪", "cap": "∩",
+    "forall": "∀", "exists": "∃", "partial": "∂", "nabla": "∇", "int": "∫", "iint": "∬", "oint": "∮",
+    "sum": "Σ", "prod": "Π", "perp": "⊥", "parallel": "∥", "angle": "∠", "circ": "°", "degree": "°",
+    "ldots": "…", "dots": "…", "cdots": "⋯", "emptyset": "∅", "neg": "¬", "land": "∧", "lor": "∨",
+    "quad": "  ", "qquad": "    ", "sin": "sin", "cos": "cos", "tan": "tan", "tg": "tg", "ctg": "ctg",
+    "cot": "cot", "ln": "ln", "log": "log", "lim": "lim", "max": "max", "min": "min", "exp": "exp",
+}
+_SUP = str.maketrans("0123456789+-=()nix", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱˣ")
+_SUB = str.maketrans("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+
+
+def _arg(t, i):
+    """Аргумент команды с позиции i: {…} или один знак/команда → (текст аргумента, следующая позиция)."""
+    while i < len(t) and t[i] == " ":
+        i += 1
+    if i >= len(t):
+        return "", i
+    if t[i] == "{":
+        j = _group_end(t, i)
+        return t[i + 1:j], j + 1
+    m = re.match(r"\\[a-zA-Z]+|.", t[i:])
+    return m.group(0), i + len(m.group(0))
+
+
+def _wrap(s):
+    """Скобки вокруг составного числителя/знаменателя: (a+b)/(c), а простое — как есть."""
+    return s if re.fullmatch(r"[\w.,′]+", s) else f"({s})"
+
+
+def tex_to_text(tex):
+    """LaTeX → читаемый текст для запасного вида: \\frac{5}{2} → 5/2, \\lambda → λ, x^2 → x², \\sqrt{x} → √x."""
+    t = fix_shorthand(tex)
+    out, i = [], 0
+    while i < len(t):
+        ch = t[i]
+        if ch == "\\":
+            m = re.match(r"\\([a-zA-Z]+|.)", t[i:])
+            name = m.group(1)
+            i += len(m.group(0))
+            if name in ("frac", "dfrac", "tfrac", "cfrac"):
+                a, i = _arg(t, i)
+                b, i = _arg(t, i)
+                out.append(f"{_wrap(tex_to_text(a))}/{_wrap(tex_to_text(b))}")
+            elif name == "sqrt":
+                deg = ""
+                if i < len(t) and t[i] == "[":
+                    j = t.find("]", i)
+                    deg, i = t[i + 1:j].translate(_SUP), j + 1
+                a, i = _arg(t, i)
+                out.append(f"{deg}√{_wrap(tex_to_text(a))}")
+            elif name in ("text", "mathrm", "mathbf", "mathit", "operatorname", "textbf", "mbox", "mathbb"):
+                a, i = _arg(t, i)
+                out.append(tex_to_text(a) if name != "mathbb" else {"R": "ℝ", "N": "ℕ", "Z": "ℤ", "Q": "ℚ",
+                                                                    "C": "ℂ"}.get(a, a))
+            elif name in ("vec", "overrightarrow", "overline", "bar", "hat", "widehat", "tilde"):
+                a, i = _arg(t, i)
+                mark = {"vec": "\u20d7", "overrightarrow": "\u20d7", "overline": "\u0305", "bar": "\u0305"}.get(name, "")
+                out.append(tex_to_text(a) + mark)
+            elif name in ("left", "right", "big", "Big", "bigg", "Bigg", "displaystyle", "limits", "nolimits"):
+                continue
+            elif name in (",", ";", ":", " ", "!"):
+                out.append(" " if name != "!" else "")
+            elif name in ("{", "}", "%", "$", "#", "&", "_"):
+                out.append(name)
+            elif name == "\\":
+                out.append("; ")
+            else:
+                out.append(_SYMBOLS.get(name, name))
+        elif ch in "^_":
+            a, i = _arg(t, i + 1)
+            s = tex_to_text(a)
+            table = _SUP if ch == "^" else _SUB
+            conv = s.translate(table)
+            if all(c in "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱˣ₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎" for c in conv):
+                out.append(conv)
+            else:
+                out.append(("^" if ch == "^" else "_") + _wrap(s))
+        elif ch in "{}":
+            i += 1
+        elif ch == "&":
+            out.append(" ")
+            i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return re.sub(r"\s+", " ", "".join(out)).strip()

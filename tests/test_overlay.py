@@ -103,6 +103,22 @@ def test_markdown_and_code():
 
 
 @test
+def test_formula_shorthand_and_fallback():
+    """Claude пишет \\frac52 и \\sqrt2 без скобок — раньше такие формулы печатались исходным текстом."""
+    from app.textfmt import fix_shorthand, tex_rows, render_tex, tex_to_text
+    assert fix_shorthand(r"\frac52") == r"\frac{5}{2}" and fix_shorthand(r"\sqrt2") == r"\sqrt{2}"
+    assert fix_shorthand(r"\dfrac\pi 2+\frac{1}{\frac34}") == r"\dfrac{\pi}{2}+\frac{1}{\frac{3}{4}}"
+    assert fix_shorthand(r"\sqrt[3]{8}") == r"\sqrt[3]{8}" and fix_shorthand(r"\frac{a}{b}") == r"\frac{a}{b}"
+    for tex in (r"x_F=\frac{x_A+\lambda x_C}{1+\lambda}=\frac{-3+\frac52\cdot(-1)}{\frac72}=-\frac{11}{7}",
+                r"\overrightarrow{BF}=\left(-\frac{11}{7}-1;\ \frac{22}{7}-4\right)=-\frac67(3;1)",
+                r"\dfrac{AF}{FC}=\dfrac52=\lambda", r"\sqrt2+\sqrt[3]{8}"):
+        for row in tex_rows(tex, True):
+            assert render_tex(row, 14, 96, "#eeeeee", "#111111").width > 10, row
+    assert tex_to_text(r"\frac{-3+\frac52\cdot(-1)}{\frac72}") == "(-3+5/2·(-1))/(7/2)"
+    assert tex_to_text(r"x^2\geq0,\ \alpha\in\mathbb{R}") == "x²≥0, α∈ℝ"
+
+
+@test
 def test_formula_render():
     from app.textfmt import render_tex, tex_rows
     img = render_tex(r"\frac{1}{2}", 14, 96, "#e8e8e8", "#16181d")

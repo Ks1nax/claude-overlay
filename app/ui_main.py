@@ -22,6 +22,7 @@ from . import stt
 from . import providers
 from . import history
 from .textfmt import (MATH, CODE, md_segments, code_blocks, last_code_block, tex_rows, render_tex, warm_up_math,
+                      tex_to_text,
                       split_wake, is_junk)
 from .ui_theme import (T, F, MONO, IS_WIN, IS_MAC, IconButton, ThinScroll, Tooltip, hand, text_cursor, init_fonts,
                        state_color, apply_theme)
@@ -261,6 +262,7 @@ class App:
         t.tag_configure("link", foreground=T["MUTED"], font=F(-3))
         t.tag_configure("anslink", foreground=T["FAINT"], font=F(-3), justify="right", spacing1=2)
         t.tag_configure("dm", justify="center", spacing1=4, spacing3=4)
+        t.tag_configure("mfall", font=(F()[0], S.font_size + 1, "italic"), foreground=T["FG"])
         t.tag_configure("err", foreground=T["ERR"])
         t.tag_configure("errhint", foreground=T["WARN"], font=F(-1))
         t.tag_configure("sep", background=T["BORDER"], font=(F()[0], 1), spacing1=0, spacing2=0, spacing3=0)
@@ -498,42 +500,39 @@ class App:
         self.heard_lbl.config(text=f"Скопировано: {what} ({len(text)} знаков)")
 
     def _math_image(self, tex, display):
-        """Картинка формулы (с кэшем) или None, если нарисовать не удалось."""
+        """Строки формулы: картинка (PhotoImage) или, если нарисовать не вышло, читаемый текст (str). С кэшем."""
         key = (tex, display, S.font_size)
         if key in self.math_cache:
             return self.math_cache[key]
-        imgs = None
-        try:
-            from PIL import Image, ImageTk
-            dpi = self.root.winfo_fpixels("1i")
-            size = S.font_size + (5 if display else 2)
-            rows = [render_tex(r, size, dpi, T["FG"], T["BG"], pad=0.03 if display else 0.005)
-                    for r in tex_rows(tex, display)]
-            max_w = max(self.text.winfo_width() - 40, 200)
-            imgs = []
-            for im in rows:
+        from PIL import Image, ImageTk
+        dpi = self.root.winfo_fpixels("1i")
+        size = S.font_size + (5 if display else 2)
+        max_w = max(self.text.winfo_width() - 40, 200)
+        out = []
+        for row in tex_rows(tex, display):  # каждая строка отдельно: одна неудачная не портит остальные
+            try:
+                im = render_tex(row, size, dpi, T["FG"], T["BG"], pad=0.03 if display else 0.005)
                 if im.width > max_w:  # длинная формула — уменьшаем под ширину окна
                     im = im.resize((max_w, max(1, int(im.height * max_w / im.width))), Image.LANCZOS)
-                imgs.append(ImageTk.PhotoImage(im))
-        except Exception as e:
-            print("[math] не удалось нарисовать:", tex, "→", str(e).splitlines()[-1] if str(e) else e)
-            imgs = None
-        self.math_cache[key] = imgs
-        return imgs
+                out.append(ImageTk.PhotoImage(im))
+            except Exception as e:
+                print("[math] не удалось нарисовать:", row, "→", str(e).strip().splitlines()[-1][:120] if str(e) else e)
+                out.append(tex_to_text(row))
+        self.math_cache[key] = out
+        return out
 
     def _insert_math(self, tex, display):
-        imgs = self._math_image(tex, display)
-        if not imgs:
-            self.text.insert("end", tex if not display else tex.strip() + "\n", ("ic",))
-            return
-        for i, img in enumerate(imgs):
+        rows = self._math_image(tex, display) or [tex_to_text(tex)]
+        for i, item in enumerate(rows):
             start = self.text.index("end-1c")
-            name = self.text.image_create("end", image=img, align="center", padx=1)
-            self.__dict__.setdefault("math_names", {})[name] = (tex, display, i)  # для перерисовки при смене темы
+            if isinstance(item, str):  # запасной вид: обычный текст (½, λ, ·, √), а не исходный код формулы
+                self.text.insert("end", item, ("mfall",))
+            else:
+                name = self.text.image_create("end", image=item, align="center", padx=1)
+                self.__dict__.setdefault("math_names", {})[name] = (tex, display, i)  # для перерисовки темы
             if display:
                 self.text.insert("end", "\n")
                 self.text.tag_add("dm", start, "end-1c")
-
     def _begin_exchange(self, question, with_screen, live=False, icon="🎧"):
         self.ans_no += 1
         self.text.config(state="normal")
@@ -1698,7 +1697,7 @@ class App:
         for _key, name, index in self.text.dump("1.0", "end", image=True):
             info = names.get(name)
             imgs = self._math_image(info[0], info[1]) if info else None
-            if imgs and info[2] < len(imgs):
+            if imgs and info[2] < len(imgs) and not isinstance(imgs[info[2]], str):
                 self.text.image_configure(index, image=imgs[info[2]])
         self._window_frame()
         print("[тема]", S.theme)
