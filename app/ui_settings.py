@@ -18,14 +18,15 @@ from .prompts import default_system_prompt, default_listen_prompt, ANALYZE_PROMP
 from .setup_tools import autostart_enabled, set_autostart
 from .ui_dialogs import make_dialog, show_dialog, show_text
 from .ui_theme import (T, F, MONO, Button, Toggle, Slider, Choice, Meter, ScrollFrame, label, card, row,
+                       RoundFrame, round_focus, _round_rect, remap,
                        entry, text_cursor, THEME_NAMES, glyph, hand)
 
 TABS = [
     ("stt", "Распознавание речи", "mic"),
-    ("sound", "Звук", "play"),
-    ("claude", "Подключение к ИИ", "help"),
-    ("keys", "Клавиши", "settings"),
-    ("look", "Внешний вид", "eye"),
+    ("sound", "Звук", "volume"),
+    ("claude", "Подключение к ИИ", "chat"),
+    ("keys", "Клавиши", "keyboard"),
+    ("look", "Внешний вид", "palette"),
     ("materials", "Материалы", "attach"),
     ("system", "Невидимость и система", "shield"),
 ]
@@ -39,31 +40,33 @@ EFFORTS = [("low", "Мало — отвечать сразу"), ("medium", "Ср
            ("", "Как в настройках Claude Code")]
 
 
-class NavItem(tk.Frame):
-    """Пункт списка вкладок: значок + название."""
+class NavItem(tk.Canvas):
+    """Пункт списка вкладок: значок + название, подсветка — скруглённая (как в главном окне)."""
+
+    H = 38
 
     def __init__(self, parent, title, icon, on_click, is_current):
-        super().__init__(parent, bg=T["BG2"], cursor=hand())
-        g, gf = glyph(icon)
-        self.icon = tk.Label(self, text=g, font=gf, bg=T["BG2"], fg=T["MUTED"], width=2)
-        self.icon.pack(side="left", padx=(10, 6), pady=8)
-        self.text = tk.Label(self, text=title, font=F(0), bg=T["BG2"], fg=T["MUTED"], anchor="w")
-        self.text.pack(side="left", fill="x", expand=True)
-        self.is_current = is_current
-        for w in (self, self.icon, self.text):
-            w.bind("<Button-1>", lambda e: on_click())
-            w.bind("<Enter>", lambda e: self._paint(hover=True))
-            w.bind("<Leave>", lambda e: self._paint())
+        super().__init__(parent, bg=T["BG2"], height=self.H, highlightthickness=0, bd=0, cursor=hand())
+        self.title, self.icon, self.is_current, self.hover = title, icon, is_current, False
+        self.bind("<Configure>", lambda e: self._paint())
+        self.bind("<Enter>", lambda e: self._set(True))
+        self.bind("<Leave>", lambda e: self._set(False))
+        self.bind("<ButtonRelease-1>", lambda e: on_click())
 
-    def _paint(self, hover=False):
+    def _set(self, v):
+        self.hover = v
+        self._paint()
+
+    def _paint(self):
+        self.delete("all")
         cur = self.is_current()
-        bg = T["BG3"] if cur else (T["BG4"] if hover else T["BG2"])
-        fg = T["FG"] if cur or hover else T["MUTED"]
-        tk.Frame.configure(self, bg=bg)
-        for w in (self.icon, self.text):
-            w.config(bg=bg)
-        self.icon.config(fg=T["ACCENT"] if cur else fg)
-        self.text.config(fg=fg)
+        w = self.winfo_width()
+        if cur or self.hover:
+            _round_rect(self, 0, 1, w - 1, self.H - 1, 8, fill=T["BG3"] if cur else T["BG4"], outline="")
+        fg = T["FG"] if cur or self.hover else T["MUTED"]
+        g, gf = glyph(self.icon)
+        self.create_text(22, self.H / 2, text=g, font=gf, fill=T["ACCENT"] if cur else fg)
+        self.create_text(44, self.H / 2, text=self.title, font=F(0), fill=fg, anchor="w")
 
     own_children = True
 
@@ -71,6 +74,7 @@ class NavItem(tk.Frame):
         self._paint()
 
     def retheme(self, cmap):
+        self.config(bg=remap(self.cget("bg"), cmap))
         self._paint()
 
 
@@ -757,10 +761,13 @@ class SettingsWindow:
         label(top, title, bold=True).pack(side="left")
         state = label(top, "", muted=True, size=-2)
         state.pack(side="left", padx=8)
-        t = tk.Text(box, height=8, wrap="word", bg=T["BG3"], fg=T["FG"], insertbackground=T["FG"], relief="flat",
-                    font=MONO(-1), padx=8, pady=6, highlightthickness=1, highlightbackground=T["BORDER"],
-                    highlightcolor=T["ACCENT"], cursor=text_cursor(), undo=True)
-        t.pack(fill="x", pady=4)
+        frame = RoundFrame(box, fill=T["BG3"], outline=T["BORDER"], pad=(4, 4))
+        frame.pack(fill="x", pady=4)
+        t = tk.Text(frame.body, height=8, wrap="word", bg=T["BG3"], fg=T["FG"], insertbackground=T["FG"],
+                    relief="flat", font=MONO(-1), padx=8, pady=6, highlightthickness=0, bd=0, cursor=text_cursor(),
+                    undo=True)
+        t.pack(fill="x")
+        round_focus(frame, t)
 
         def load():
             t.delete("1.0", "end")
@@ -841,20 +848,20 @@ class SettingsWindow:
         self._slider(c, "Ширина", "width", 340, min(1600, sw), 10, "{:.0f} пикс.", as_int=True)
         self._slider(c, "Высота", "height", 220, min(1600, sh), 10, "{:.0f} пикс.", "Положение и размер окна "
                      "запоминаются сами, когда двигаешь его мышкой", as_int=True,
-                     value=S.height or self.app.root.winfo_height())
+                     value=S.height or self.app.window_height())
         self._toggle(c, "Поле для вопроса текстом", "text_input",
                      f"Внизу окна; {key_display(S.hotkey_type)} — сразу поставить туда курсор из любой программы")
         self._toggle(c, "Компактный режим", "compact",
                      "Окно — маленькая полоска со статусом; при ответе разворачивается само")
-        Choice(row(c, "Шрифт формул"), [("cm", "Как в учебнике (Computer Modern)"), ("stix", "STIX (как в Word)"),
-                                        ("dejavusans", "Без засечек")], S.math_fontset,
-               lambda v: (S.update(math_fontset=v), self.app.math_cache.clear())).pack()
+        self._toggle(c, "Призрачный режим", "ghost",
+                     "Окно бледнеет, когда мышка не над ним и ничего не происходит, — меньше мешает смотреть лекцию")
+        self._slider(c, "Насколько бледнеет", "ghost_fade", 0.1, 0.95, 0.05, "на {:.0%}",
+                     "В призрачном режиме, пока мышка не над окном. Двигай — окно сразу покажет, как будет")
         r = row(c, "Положение окна", "Если окно потерялось за краем экрана")
         Button(r, "Вернуть в правый верхний угол", lambda: S.update(pos_x=None, pos_y=None), small=True).pack()
         c = card(p, "Тема")
-        r = row(c, "Цвета", "Тема меняется после перезапуска оверлея")
+        r = row(c, "Цвета", "Тема меняется сразу; её же можно выбрать в меню ⚙ главного окна")
         Choice(r, list(THEME_NAMES.items()), S.theme, lambda v: S.update(theme=v), width=16).pack(side="left")
-        Button(r, "Перезапустить", lambda: self.app.restart(["--settings"]), small=True).pack(side="left", padx=6)
 
     # ------------------------------------------------------------ 6. материалы
     def _page_materials(self, p):

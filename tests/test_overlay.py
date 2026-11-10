@@ -2,7 +2,8 @@
 """Тесты Claude Overlay. Запуск из папки программы:
 
     .venv\\Scripts\\python.exe tests\\test_overlay.py            — логика, без окон и устройств
-    .venv\\Scripts\\python.exe tests\\test_overlay.py --ui       — плюс окна Tk (прозрачные: на экране их не видно)
+    .venv\\Scripts\\python.exe tests\\test_overlay.py --ui       — плюс окна: логика главного окна, настоящее окно на движке Edge,
+                                                               настройки, мастер (окна прозрачные)
     .venv\\Scripts\\python.exe tests\\test_overlay.py --whisper  — плюс настоящее распознавание «Клод, …» (нужна модель small)
 
 Рабочая папка — временная (CLAUDE_OVERLAY_WORKDIR): настоящие настройки и материалы не трогаются.
@@ -514,13 +515,14 @@ class FakeSession:
 def fake_cli_ask(ui_q, cli, rid, content, session_id, gen, cancel, set_proc):
     fake_cli_ask.calls.append((content, session_id))
     ui_q.put(("session", gen, "sess-1"))
-    for part in ("**Ответ:** 42\n", "```python\nprint(1)\n```\n", "$$\\frac{1}{2}$$\n"):
+    for part in (fake_cli_ask.parts or ("**Ответ:** 42\n", "```python\nprint(1)\n```\n", "$$\\frac{1}{2}$$\n")):
         time.sleep(0.02)
         ui_q.put(("delta", rid, part))
     ui_q.put(("done", rid))
 
 
 fake_cli_ask.calls = []
+fake_cli_ask.parts = None
 
 
 class Dummy(threading.Thread):
@@ -618,7 +620,58 @@ def _quiet_tk():
     tk.Wm.wm_deiconify = tk.Wm.deiconify = deiconify
 
 
-def make_app():
+class FakeWeb:
+    """Подставное главное окно: запоминает, что программа отправила бы в окно."""
+
+    def __init__(self):
+        self.sent = []
+        self.visible = True
+        self.ready = False
+        self.hwnd = None
+        self._rect = (100, 100, 660, 800)
+        self.win = None
+
+    def send(self, name, payload=None, key=None):
+        self.sent.append((name, payload))
+
+    def last(self, name):
+        for n, p in reversed(self.sent):
+            if n == name:
+                return p
+        return None
+
+    def all(self, name):
+        return [p for n, p in self.sent if n == name]
+
+    def mark_ready(self):
+        self.ready = True
+
+    def rect(self):
+        return self._rect
+
+    def set_rect(self, x, y, w, h):
+        self._rect = (x, y, x + w, y + h)
+
+    def scale(self):
+        return 1.0
+
+    def show(self):
+        self.visible = True
+
+    def hide(self):
+        self.visible = False
+
+    def unminimize(self):
+        pass
+
+    def focus(self):
+        self.send("focus", {})
+
+    def destroy(self):
+        pass
+
+
+def _patch_devices():
     from app import ui_main, stt
     _quiet_tk()
     ui_main.Listener = Dummy
@@ -629,8 +682,14 @@ def make_app():
     ui_main.find_claude = lambda: sys.executable          # «Claude Code найден»
     stt.Transcriber = DummyTranscriber
     stt.ListenTranscriber = lambda ui_q, models: Dummy()
-    S.update(alpha=0.0)                                   # окно прозрачное — пользователю на экране не мешает
-    app = ui_main.App()
+
+
+def make_app():
+    from app import ui_main
+    _patch_devices()
+    app = ui_main.App(web=FakeWeb())
+    app._setup()
+    app.web_ready()
     pump(app, 1.0)
     return app
 
@@ -639,51 +698,63 @@ def make_app():
 def test_ui_main_window():
     if not UI:
         return "пропущен (нужен --ui)"
-    from app import winsys
     app = make_app()
+    web = app.web
     try:
-        assert app.ready
-        assert app.text.get("1.0", "end").strip() == "", "при запуске окно должно быть пустым"
-        assert app.foot.winfo_ismapped(), "нижняя строка должна быть видна"
+        assert app.ready and web.ready
+        assert not web.all("begin"), "при запуске окно должно быть пустым"
+        init = web.last("init")
+        assert init["hotkeys"]["listen"] == "F7" and init["mode"]["ok"] and init["theme"]["vars"]["bg"]
         app.toggle_info()
-        assert app.info_win is not None
-        app.toggle_info()
-        assert app.info_win is None
-        if winsys.IS_WIN:
-            h = winsys.tk_hwnd(app.root)
-            assert winsys.get_affinity(h) == winsys.WDA_EXCLUDEFROMCAPTURE, "окно должно быть невидимо для захвата"
-            assert winsys.is_tool_window(h), "у окна не должно быть кнопки на панели задач"
-            assert app.guard.fully_hidden()
+        assert web.last("info")["rows"]
         # «Клод, …» → скриншот + ответ, продолжение диалога через session_id
         app.on_heard("Клод, реши задачу")
         pump(app, 1.0)
         content, sid = fake_cli_ask.calls[-1]
         assert any(b["type"] == "image" for b in content) and sid is None
-        txt = app.text.get("1.0", "end")
-        assert "реши задачу" in txt and "42" in txt and "Копировать" in txt and "Копировать ответ" in txt
+        b = web.last("begin")
+        assert b["question"] == "реши задачу" and b["src"] == "voice" and b["thumb"].startswith("data:image/jpeg")
+        f = web.last("finish")
+        assert f["id"] == b["id"] and "42" in f["md"] and "print(1)" in f["md"] and f["quick"] and not f["error"]
+        assert app.shot_preview(b["id"]).startswith("data:image/jpeg")
+        assert web.last("heard")["text"] == "Услышал: Клод, реши задачу"
         assert app.session_id == "sess-1" and app.followup_until > time.time()
-        app.on_heard("и ещё без циклов")                   # дополнение без «Клод» в течение 15 с
+        app.on_heard("и ещё без циклов")                   # дополнение без «Клод» в течение нескольких секунд
         pump(app, 1.0)
         assert fake_cli_ask.calls[-1][1] == "sess-1"
+        app.followup_until = 0
+        app.on_heard("чужой разговор про погоду")           # без «Клод» и после паузы — не команда
+        assert web.last("heard")["kind"] == "notme"
+        # кнопки под ответом: «Короче» — уточнение в том же диалоге, без скриншота
+        app.quick("Короче")
+        pump(app, 0.8)
+        assert web.last("begin")["src"] == "quick" and web.last("begin")["question"] == "Короче"
+        assert not any(b["type"] == "image" for b in fake_cli_ask.calls[-1][0])
+        assert "короче" in fake_cli_ask.calls[-1][0][-1]["text"]
         # голосовые команды
         app.command("скопируй код")
         assert app.root.clipboard_get() == "print(1)"
+        assert web.last("toast")["text"].startswith("Скопировано")
         app.command("скрой")
-        assert not app.visible
+        assert not app.visible and not web.visible
         app.command("покажи")
-        assert app.visible
+        assert app.visible and web.visible
         app.command("вниз")
-        assert app.follow is False
+        assert web.last("scroll") == {"dir": "down"}
         app.command("новая задача")
-        assert app.session_id is None and "контекст очищен" in app.text.get("1.0", "end")
+        assert app.session_id is None and web.last("clear") is not None
         app.command("без экрана, что такое интеграл")
         pump(app, 0.8)
         assert not any(b["type"] == "image" for b in fake_cli_ask.calls[-1][0])
+        assert web.last("begin")["meta"] == "без скриншота"
         # F7: запись → отмена; запись → конец → распознавание → «Скажи:»
         app.listen_start()
-        assert app.rec is not None and app.listen_pause.is_set()
+        pump(app, 0.2)
+        assert app.rec is not None and app.listen_pause.is_set() and web.last("rec")["on"]
+        assert web.last("status")["step"] == "hear"
         app.listen_cancel()
-        assert app.rec is None and not app.listen_pause.is_set()
+        pump(app, 0.2)
+        assert app.rec is None and not app.listen_pause.is_set() and not web.last("rec")["on"]
         app.listen_start()
         app.listen_finish()
         pump(app, S.listen_post_seconds + 0.5)
@@ -691,38 +762,40 @@ def test_ui_main_window():
         assert len(audio) > 16000 and app.last_f7_audio is not None
         app.ui_q.put(("listen_text", job_id, "чем процесс отличается от потока", "ru", 1.0, None))
         pump(app, 0.8)
-        assert "Скажи:" in app.text.get("1.0", "end") and FakeSession.sent
-        # окно не листается само: вопрос — в верху окна
-        top = app.text.index("@0,0")
-        assert app.text.compare(top, "<=", "q_start + 1 lines"), (top, app.text.index("q_start"))
+        assert web.last("begin")["src"] == "f7" and "Скажи:" in web.last("finish")["md"] and FakeSession.sent
         # материалы
         app.attach_text("## Ключевые слова\nACID, транзакция", "Конспект")
         pump(app, 0.8)
-        assert app.materials.items and app.mat_bar.winfo_ismapped()
-        app.clear_materials()
-        assert not app.materials.items
+        items = web.last("mats")["items"]
+        assert app.materials.items and items and items[0]["title"] == "Конспект"
+        app.remove_material(items[0]["id"])
+        assert not app.materials.items and web.last("mats")["items"] == []
         # компактный режим: полоска; при ответе — разворачивается
         S.update(compact=True)
         pump(app, 0.3)
-        assert app.root.winfo_height() < 60
+        x0, y0, x1, y1 = web.rect()
+        assert y1 - y0 < 60 and web.last("compact")["on"]
         app.on_heard("Клод, привет")
         pump(app, 0.8)
-        assert app.root.winfo_height() > 150
+        x0, y0, x1, y1 = web.rect()
+        assert y1 - y0 > 150 and not web.last("compact")["on"]
         S.update(compact=False)
         pump(app, 0.3)
-        # вопрос текстом: поле внизу, Enter — отправить; история сохраняется
+        # вопрос текстом: из поля внизу окна; история сохраняется
         from app import history
         n_calls = len(fake_cli_ask.calls)
         app.focus_entry()
-        app.entry.delete(0, "end")
-        app.entry.insert(0, "сколько будет 2+2")
-        app.submit_text()
+        assert web.last("focus") is not None
+        app.submit_text("сколько будет 2+2")
         pump(app, 1.0)
         assert len(fake_cli_ask.calls) == n_calls + 1 and fake_cli_ask.calls[-1][0][-1]["text"] == "сколько будет 2+2"
-        assert "⌨ сколько будет 2+2" in app.text.get("1.0", "end")
+        assert web.last("begin")["src"] == "text"
         recs = history.load()
         assert recs and recs[0]["q"] == "сколько будет 2+2" and recs[0]["kind"] == "text" and "42" in recs[0]["a"]
         assert history.load("2+2") and not history.load("такого точно нет")
+        from app.webwin import Bridge
+        h = Bridge(app).history("2+2")
+        assert h["items"] and h["items"][0]["q"] == "сколько будет 2+2"
         # кусок экрана: рамка мышкой → прикладывается к следующему вопросу вместо всего экрана
         from app.region import RegionPicker
         got = []
@@ -735,35 +808,36 @@ def test_ui_main_window():
         pump(app, 0.2)
         assert got and got[0].size == (200, 140), got
         app.set_pending_shot(got[0])
+        assert web.last("shot") == {"w": 200, "h": 140}
         app.on_heard("Клод, что тут")
         pump(app, 1.0)
         imgs = [b for b in fake_cli_ask.calls[-1][0] if b["type"] == "image"]
         import base64, io
         from PIL import Image
         assert imgs and Image.open(io.BytesIO(base64.b64decode(imgs[0]["source"]["data"]))).size == (200, 140)
-        assert getattr(app, "pending_shot", None) is None
-        # окно истории
+        assert app.pending_shot is None and web.last("shot") is None and web.last("begin")["meta"] == "кусок экрана"
+        # история, справка
         app.open_history()
-        pump(app, 0.4)
-        assert app.history_win is not None
-        app.history_win.destroy()
+        assert web.sent[-1][0] == "history"
+        app.open_help()
+        assert web.last("help")["sections"]
         # тема меняется сразу, без перезапуска
         from app.ui_theme import THEMES
         for th in ("light", "midnight", "dark"):
             S.update(theme=th)
             pump(app, 0.3)
-            assert app._head.cget("bg") == THEMES[th]["BG2"] and app.text.cget("bg") == THEMES[th]["BG"], th
-            assert app.text.tag_cget("user", "background") == THEMES[th]["Q_BG"]
+            assert web.last("theme")["vars"]["bg"] == THEMES[th]["BG"], th
+            assert web.last("theme")["vars"]["qbg"] == THEMES[th]["Q_BG"]
         # ответ через другого провайдера (поддельный сервис в формате OpenAI)
         from app import providers as pv
         fake = FakeOpenAI()
         pv.save_key("custom", "good-key")
         S.update(backend="provider", provider="custom", provider_base_url=fake.url, provider_model="m1")
         pump(app, 0.3)
-        assert app.provider and not app.cli
+        assert app.provider and not app.cli and web.last("mode")["ok"]
         app.on_heard("Клод, что такое поток")
         pump(app, 1.5)
-        assert "Процесс — программа." in app.text.get("1.0", "end"), app.text.get("end-6l", "end")
+        assert "Процесс — программа." in web.last("finish")["md"], web.last("finish")
         assert any(p.get("type") == "image_url" for p in fake.bodies[-1]["messages"][-1]["content"])
         for k in ("backend", "provider", "provider_base_url", "provider_model"):
             S.reset(k)
@@ -771,11 +845,12 @@ def test_ui_main_window():
         fake.srv.shutdown()
         pump(app, 0.3)
         # настройки на ходу
-        S.update(font_size=13)
+        S.update(font_size=13, ghost=True)
         S.update(hotkey_listen="<f6>")
         pump(app, 0.3)
-        assert app.hk.actions["listen"] == "<f6>"
-        S.reset("font_size", "hotkey_listen")
+        assert app.hk.actions["listen"] == "<f6>" and web.last("hotkeys")["listen"] == "F6"
+        assert web.last("font")["fs"] == 17 and web.last("prefs") == {"ghost": True}
+        S.reset("font_size", "hotkey_listen", "ghost")
         pump(app, 0.2)
     finally:
         app.root.destroy()
@@ -810,6 +885,111 @@ def test_ui_settings_and_dialogs():
         assert shot.width > 100 and isinstance(ok, bool) and msg
     finally:
         app.root.destroy()
+
+
+@test
+def test_web_window():
+    """Настоящее окно на движке Edge с настоящей логикой (заглушки вместо микрофона и Claude): формулы, код,
+    «Скажи:», окно не листается само, компактный режим, невидимость, нет на панели задач."""
+    if not UI:
+        return "пропущен (нужен --ui)"
+    from app import webwin, winsys
+    if not webwin.available():
+        return "пропущен (нет pywebview)"
+    from app import ui_main
+    _patch_devices()
+    S.update(alpha=0.0, pos_x=60, pos_y=60, width=520, height=700)     # окно прозрачное — на экране его не видно
+    app = ui_main.App()
+    app._quit = lambda: app.web.destroy()
+    res = {}
+
+    def js(code):
+        return app.web.win.evaluate_js(code)
+
+    def wait(cond, secs=8.0):
+        t = time.time() + secs
+        while time.time() < t:
+            try:
+                if cond():
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.1)
+        return False
+
+    def n(sel):
+        return js(f"document.querySelectorAll({json.dumps(sel)}).length")
+
+    def flow():
+        try:
+            res["ready"] = wait(lambda: app.web.ready and app.ready, 25)
+            h = app.web.hwnd
+            res["tool"] = winsys.is_tool_window(h)
+            res["affinity"] = winsys.get_affinity(h)
+            # ответ с формулой, кодом и таблицей
+            fake_cli_ask.parts = ["Формула: $T = 2\\pi\\sqrt{\\frac{l}{g}}$ и отдельно:\n\n$$\\frac52 + \\sqrt2$$\n\n",
+                                  "| a | b |\n|---|---|\n| 1 | 2 |\n\n", "```python\nprint('hi')\n```\n"]
+            app.ui_q.put(("call", lambda: app.submit_text("покажи формулу")))
+            res["answer"] = wait(lambda: n(".card .acts") >= 1)
+            res["katex"] = n(".card .katex")
+            res["display"] = n(".card .katex-display")
+            res["mfall"] = n(".card .mfall")
+            res["code"] = js("document.querySelector('.codeb .ch span').textContent")
+            res["hl"] = n(".codeb .hljs-built_in, .codeb .hljs-string")
+            res["table"] = n(".card table td")
+            # много вопросов: каждый новый встаёт в верх ленты
+            fake_cli_ask.parts = ["Строка ответа.\n\n" * 30]
+            for i in range(3):
+                app.ui_q.put(("call", lambda i=i: app.submit_text(f"вопрос {i}")))
+                wait(lambda i=i: n(".card") >= 2 + i and n(".card .acts") >= 2 + i)
+            res["top"] = js("(() => { const f = document.getElementById('feed'), c = [...f.querySelectorAll('.card')].pop();"
+                            " return Math.round(c.getBoundingClientRect().top - f.getBoundingClientRect().top); })()")
+            # сам пролистал вверх — новый текст не утаскивает окно
+            scroll_up = ("(() => { const f = document.getElementById('feed');"
+                         " f.dispatchEvent(new WheelEvent('wheel', {deltaY: -100})); f.scrollTop = 0; return 1; })()")
+            fake_cli_ask.parts = ["Ещё ответ.\n\n" * 5]
+            app.ui_q.put(("call", lambda: app.ask("дополни", screen=False)))
+            wait(lambda: n(".card") >= 5)
+            js(scroll_up)
+            wait(lambda: n(".card .acts") >= 5)
+            time.sleep(0.3)
+            res["kept"] = js("document.getElementById('feed').scrollTop")
+            res["down"] = js("document.getElementById('down').classList.contains('on')")
+            # F7: «Скажи:» — отдельным блоком
+            app.ui_q.put(("call", lambda: app.ask("чем процесс отличается от потока", screen=False, listen=True)))
+            res["say"] = wait(lambda: n(".card .say") >= 1)
+            # компактный режим — окно становится полоской
+            app.ui_q.put(("call", lambda: S.update(compact=True)))
+            wait(lambda: js("document.documentElement.classList.contains('island')"))
+            time.sleep(0.4)
+            L, T, R, B = app.web.rect()
+            res["island_h"] = B - T
+            app.ui_q.put(("call", lambda: S.update(compact=False)))
+            wait(lambda: not js("document.documentElement.classList.contains('island')"))
+            time.sleep(0.4)
+            L, T, R, B = app.web.rect()
+            res["full_h"] = B - T
+        except Exception:
+            res["exc"] = traceback.format_exc()
+        finally:
+            app.web.destroy()
+
+    threading.Thread(target=flow, daemon=True).start()
+    app.run()
+    for k in ("alpha", "pos_x", "pos_y", "width", "height", "compact"):
+        S.reset(k)
+    fake_cli_ask.parts = None
+    assert "exc" not in res, res.get("exc")
+    assert res["ready"], "окно не загрузилось"
+    assert res["tool"], "у окна не должно быть кнопки на панели задач"
+    assert res["affinity"] == winsys.WDA_EXCLUDEFROMCAPTURE, hex(res["affinity"] or 0)
+    assert res["answer"] and res["katex"] >= 2 and res["display"] >= 1 and res["mfall"] == 0, res
+    assert res["code"] == "python" and res["hl"] >= 1 and res["table"] == 2, res
+    assert 0 <= res["top"] <= 30, f"новый вопрос должен вставать в верх окна: {res['top']}"
+    assert res["kept"] == 0 and res["down"], f"пролистанное окно не должно уезжать: {res}"
+    assert res["say"], "«Скажи:» должно быть отдельным блоком"
+    assert res["island_h"] < 70 and res["full_h"] > 400, res
+    return f"формул {res['katex']}, окно-полоска {res['island_h']} пикс."
 
 
 @test

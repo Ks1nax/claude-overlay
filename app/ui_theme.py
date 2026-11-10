@@ -61,6 +61,9 @@ GLYPHS = {
     "delete": ("", "🗑"), "download": ("", "⬇"), "folder": ("", "📁"), "history": ("", "🕘"), "crop": ("", "✂"), "send": ("", "➤"), "eye": ("", "👁"),
 }
 
+GLYPHS["chev"] = ("\ue70d", "▾")
+GLYPHS.update(volume=("\ue767", "V"), chat=("\ue8f2", "C"), keyboard=("\ue765", "K"), palette=("\ue790", "P"))
+
 STATE_KEYS = {"loading": "MUTED", "idle": "OK", "await": "PURPLE", "followup": "PURPLE", "stt": "WARN",
               "think": "INFO", "answer": "INFO", "error": "ERR", "listen": "TEAL", "rec": "REC",
               "download": "WARN"}
@@ -151,6 +154,9 @@ def bg_of(widget):
         return T["BG"]
 
 
+R = 8   # одно закругление для всего (как у окон Windows 11 и главного окна)
+
+
 def _round_rect(c, x0, y0, x1, y1, r, **kw):
     r = max(0, min(r, (x1 - x0) / 2, (y1 - y0) / 2))
     pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1, x1 - r, y1, x0 + r, y1,
@@ -233,6 +239,46 @@ class IconButton(tk.Label):
             self.command()
 
 
+class RoundIconButton(tk.Canvas):
+    """Значок в скруглённом квадрате, как кнопки главного окна; danger — при наведении красная (крестик «закрыть»)."""
+
+    def __init__(self, parent, name, command, tip="", size=30, danger=False):
+        self.parent_bg = bg_of(parent)
+        super().__init__(parent, width=size, height=size, bg=self.parent_bg, highlightthickness=0, bd=0,
+                         cursor=hand())
+        self.name, self.command, self.size, self.danger, self.hover = name, command, size, danger, False
+        self.bind("<Enter>", lambda e: self._set(True))
+        self.bind("<Leave>", lambda e: self._set(False))
+        self.bind("<ButtonRelease-1>", self._click)
+        if tip:
+            Tooltip(self, tip)
+        self._draw()
+
+    own_children = True
+
+    def _set(self, hover):
+        self.hover = hover
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        s = self.size
+        if self.hover:
+            _round_rect(self, 0, 0, s - 1, s - 1, 8, fill=T["ERR"] if self.danger else T["BG4"], outline="")
+        fg = (T["BG"] if self.danger else T["FG"]) if self.hover else T["MUTED"]
+        text, font = glyph(self.name)
+        self.create_text(s / 2, s / 2, text=text, font=(font[0], 10) + tuple(font[2:]), fill=fg)
+
+    def retheme(self, cmap):
+        self.parent_bg = remap(self.parent_bg, cmap)
+        self.config(bg=self.parent_bg)
+        self._draw()
+
+    def _click(self, e):
+        if 0 <= e.x <= self.winfo_width() and 0 <= e.y <= self.winfo_height() and self.command:
+            self.command()
+
+
 class Button(tk.Canvas):
     """Скруглённая кнопка. kind: primary / secondary / ghost / danger."""
 
@@ -277,7 +323,7 @@ class Button(tk.Canvas):
         h = f.metrics("linespace") + 2 * pady
         self.config(width=w, height=h)
         bg, fg = self._colors()
-        _round_rect(self, 1, 1, w - 1, h - 1, 7, fill=bg, outline=bg)
+        _round_rect(self, 1, 1, w - 1, h - 1, R, fill=bg, outline=bg)
         x = (w - tw - icon_w) / 2
         if self.icon:
             itxt, ifont = glyph(self.icon)
@@ -326,11 +372,11 @@ class Toggle(tk.Canvas):
         self.delete("all")
         on = self.value
         track = (T["ACCENT"] if on else T["BG4"]) if self.enabled else T["BG3"]
-        _round_rect(self, 1, 1, self.W - 1, self.H - 1, self.H / 2, fill=track, outline=track)
+        _round_rect(self, 1, 1, self.W - 1, self.H - 1, 7, fill=track, outline=track)
         r = self.H / 2 - 4
         cx = self.W - self.H / 2 if on else self.H / 2
         knob = "#ffffff" if self.enabled else T["FAINT"]
-        self.create_oval(cx - r, self.H / 2 - r, cx + r, self.H / 2 + r, fill=knob, outline=knob)
+        _round_rect(self, cx - r, self.H / 2 - r, cx + r, self.H / 2 + r, 4, fill=knob, outline=knob)
 
     def _click(self, _e=None):
         if not self.enabled:
@@ -380,9 +426,10 @@ class Slider(tk.Canvas):
         self.delete("all")
         y = self.H / 2
         x = self._x(self.value)
-        self.create_line(10, y, self.w - 10, y, fill=T["BG4"], width=4, capstyle="round")
-        self.create_line(10, y, x, y, fill=T["ACCENT"], width=4, capstyle="round")
-        self.create_oval(x - 8, y - 8, x + 8, y + 8, fill="#ffffff", outline=T["ACCENT"], width=2)
+        _round_rect(self, 10, y - 2, self.w - 10, y + 2, 2, fill=T["BG4"], outline=T["BG4"])
+        if x > 12:
+            _round_rect(self, 10, y - 2, x, y + 2, 2, fill=T["ACCENT"], outline=T["ACCENT"])
+        _round_rect(self, x - 8, y - 8, x + 8, y + 8, 5, fill="#ffffff", outline=T["ACCENT"], width=2)
 
     def _val(self, x):
         f = max(0.0, min(1.0, (x - 10) / max(1, self.w - 20)))
@@ -415,22 +462,213 @@ class Slider(tk.Canvas):
         self._draw()
 
 
-class Choice(ttk.Combobox):
-    """Выпадающий список: options = [(значение, подпись)]."""
+class RoundFrame(tk.Canvas):
+    """Рамка со скруглёнными углами: содержимое кладётся в self.body. stretch — тянуть по ширине родителя
+    (блоки настроек), иначе — по содержимому (поле ввода)."""
+
+    def __init__(self, parent, fill=None, outline=None, pad=(14, 12), radius=None, stretch=True):
+        super().__init__(parent, bg=bg_of(parent), highlightthickness=0, bd=0, height=10, width=10)
+        self.fill_c, self.outline_c = fill or T["BG2"], outline or T["BORDER"]
+        self.px, self.py = pad
+        self.radius = R if radius is None else radius
+        self.stretch = stretch
+        self.body = tk.Frame(self, bg=self.fill_c)
+        self._win = self.create_window(self.px, self.py, window=self.body, anchor="nw")
+        self.body.bind("<Configure>", self._fit, add="+")
+        self.bind("<Configure>", self._fit, add="+")
+
+    def _fit(self, _e=None):
+        bw, bh = self.body.winfo_reqwidth(), self.body.winfo_reqheight()
+        h = bh + 2 * self.py
+        if self.stretch:
+            w = self.winfo_width()
+            if w > 2 * self.px:
+                self.itemconfigure(self._win, width=w - 2 * self.px)
+        else:
+            w = bw + 2 * self.px
+            if int(float(self.cget("width"))) != w:
+                self.configure(width=w)
+        if int(float(self.cget("height"))) != h:
+            self.configure(height=h)
+        self.delete("rbg")
+        _round_rect(self, 1, 1, max(2, w - 2), max(2, h - 2), self.radius, fill=self.fill_c, outline=self.outline_c,
+                    tags="rbg")
+        self.tag_lower("rbg")
+
+    def set_outline(self, color):
+        self.outline_c = color
+        self.itemconfigure("rbg", outline=color)
+
+    def retheme(self, cmap):
+        self.fill_c, self.outline_c = remap(self.fill_c, cmap), remap(self.outline_c, cmap)
+        self.config(bg=remap(self.cget("bg"), cmap))
+        self._fit()
+
+
+class _ChoiceRow(tk.Canvas):
+    """Строка выпадающего списка: подсветка при наведении — скруглённая."""
+
+    H = 30
+
+    def __init__(self, parent, text, selected, on_click):
+        super().__init__(parent, height=self.H, bg=bg_of(parent), highlightthickness=0, bd=0, cursor=hand())
+        self.text, self.selected, self.hover = text, selected, False
+        self.bind("<Configure>", lambda e: self._draw())
+        self.bind("<Enter>", lambda e: self._set(True))
+        self.bind("<Leave>", lambda e: self._set(False))
+        self.bind("<ButtonRelease-1>", lambda e: on_click())
+
+    def _set(self, v):
+        self.hover = v
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        w = self.winfo_width()
+        if self.hover:
+            _round_rect(self, 0, 1, w - 1, self.H - 1, R, fill=T["BG4"], outline="")
+        self.create_text(12, self.H / 2, text=self.text, anchor="w", font=F(0, "bold" if self.selected else "normal"),
+                         fill=T["ACCENT2"] if self.selected else T["FG"])
+
+
+class Choice(tk.Canvas):
+    """Выпадающий список: options = [(значение, подпись)]. Поле со скруглением, список — своё окошко со скруглёнными
+    углами (как у главного окна), невидимое на демонстрации экрана."""
+
+    H = 32
 
     def __init__(self, parent, options, value, command=None, width=28):
+        self.parent_bg = bg_of(parent)
+        f = tkfont.Font(font=F(0))
+        self.W = max(120, min(560, f.measure("0") * width + 44))
+        super().__init__(parent, width=self.W, height=self.H, bg=self.parent_bg, highlightthickness=0, bd=0,
+                         cursor=hand())
         self.options = list(options)
-        labels = [lab for _, lab in self.options]
-        super().__init__(parent, values=labels, state="readonly", width=width, font=F(0))
         self.command = command
+        self._label = ""
+        self.hover = False
+        self.popup = None
+        self.bind("<Enter>", lambda e: self._set_hover(True))
+        self.bind("<Leave>", lambda e: self._set_hover(False))
+        self.bind("<ButtonRelease-1>", lambda e: self._toggle())
+        self.bind("<Configure>", lambda e: self._draw())
         self.set_value(value)
-        self.bind("<<ComboboxSelected>>", self._sel)
+
+    own_children = True
+
+    def _set_hover(self, v):
+        self.hover = v
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        w = self.winfo_width() if self.winfo_width() > 20 else self.W
+        _round_rect(self, 1, 1, w - 1, self.H - 1, R, fill=T["BG3"],
+                    outline=T["ACCENT"] if self.popup else (T["SEL"] if self.hover else T["BORDER"]))
+        f = tkfont.Font(font=F(0))
+        text, room = self._label, w - 44
+        if f.measure(text) > room:
+            while text and f.measure(text + "…") > room:
+                text = text[:-1]
+            text += "…"
+        self.create_text(12, self.H / 2, text=text, anchor="w", font=F(0), fill=T["FG"])
+        g, gf = glyph("chev")
+        self.create_text(w - 17, self.H / 2, text=g, font=(gf[0], 9) if ICON_FONT else gf, fill=T["MUTED"])
+
+    def retheme(self, cmap):
+        self.parent_bg = remap(self.parent_bg, cmap)
+        self.config(bg=self.parent_bg)
+        self._draw()
+
+    # --- как у ttk.Combobox: подпись выбранного
+    def set(self, label):
+        self._label = label
+        self._draw()
+
+    def get(self):
+        return self._label
+
+    def selection_clear(self):
+        pass
 
     def set_options(self, options, value=None):
         self.options = list(options)
-        self.config(values=[lab for _, lab in self.options])
         if value is not None:
             self.set_value(value)
+
+    # --- список
+    def _toggle(self):
+        if self.popup is not None:
+            self._close()
+        else:
+            self._open()
+
+    def _open(self):
+        from . import winsys
+        top = tk.Toplevel(self)
+        top.withdraw()
+        if IS_WIN:
+            top.attributes("-toolwindow", True)    # ДО overrideredirect
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.configure(bg=T["BG3"])
+        n = len(self.options)
+        rows = min(n, 10)
+        h = rows * _ChoiceRow.H + 12
+        f = tkfont.Font(font=F(0, "bold"))
+        width = max(self.winfo_width(), min(620, max([f.measure(lab) for _, lab in self.options] or [100]) + 48))
+        if n > 10:
+            sf = ScrollFrame(top, bg=T["BG3"])
+            sf.pack(fill="both", expand=True, padx=(6, 2), pady=6)
+            box = sf.body
+        else:
+            box = tk.Frame(top, bg=T["BG3"])
+            box.pack(fill="both", expand=True, padx=6, pady=6)
+        for v, lab in self.options:
+            _ChoiceRow(box, lab, lab == self._label, lambda v=v: self._pick(v)).pack(fill="x")
+        x, y = self.winfo_rootx(), self.winfo_rooty() + self.H + 4
+        if y + h > self.winfo_screenheight() - 40:
+            y = self.winfo_rooty() - h - 4
+        top.geometry(f"{int(width)}x{int(h)}+{x}+{y}")
+        self.popup = top
+        top.deiconify()
+        try:
+            winsys.style_frame(winsys.tk_hwnd(top), T["SEL"])
+        except Exception:
+            pass
+        top.bind("<ButtonPress-1>", self._outside, add="+")
+        top.bind("<Escape>", lambda e: self._close())
+        try:
+            top.grab_set()
+            top.focus_force()
+        except tk.TclError:
+            pass
+        self._draw()
+
+    def _outside(self, e):
+        top = self.popup
+        if top is None:
+            return
+        inside = (top.winfo_rootx() <= e.x_root < top.winfo_rootx() + top.winfo_width()
+                  and top.winfo_rooty() <= e.y_root < top.winfo_rooty() + top.winfo_height())
+        if not inside:
+            self._close()
+
+    def _close(self):
+        top, self.popup = self.popup, None
+        if top is not None:
+            try:
+                top.grab_release()
+                top.destroy()
+            except tk.TclError:
+                pass
+        self._draw()
+
+    def _pick(self, v):
+        self._close()
+        self.set_value(v)
+        if self.command:
+            self.command(v)
 
     def set_value(self, value):
         for v, lab in self.options:
@@ -447,17 +685,42 @@ class Choice(ttk.Combobox):
                 return v
         return None
 
-    def _sel(self, _e=None):
-        self.selection_clear()
-        if self.command:
-            self.command(self.value())
+class _REntry(tk.Entry):
+    """Поле ввода внутри скруглённой рамки: pack/grid/place двигают рамку целиком."""
+
+    def pack(self, *a, **k):
+        return self._box.pack(*a, **k)
+
+    pack_configure = pack
+
+    def pack_forget(self):
+        return self._box.pack_forget()
+
+    def grid(self, *a, **k):
+        return self._box.grid(*a, **k)
+
+    grid_configure = grid
+
+    def place(self, *a, **k):
+        return self._box.place(*a, **k)
+
+    place_configure = place
+
+
+def round_focus(box, widget):
+    """Рамка подсвечивается, пока в поле курсор."""
+    widget.bind("<FocusIn>", lambda e: box.set_outline(T["ACCENT"]), add="+")
+    widget.bind("<FocusOut>", lambda e: box.set_outline(T["BORDER"]), add="+")
 
 
 def entry(parent, value="", width=30, show=None):
-    e = tk.Entry(parent, bg=T["BG3"], fg=T["FG"], insertbackground=T["FG"], relief="flat", font=F(0),
-                 width=width, highlightthickness=1, highlightbackground=T["BORDER"], highlightcolor=T["ACCENT"],
-                 disabledbackground=T["BG2"], selectbackground=T["SEL"], selectforeground=T["FG"],
-                 cursor=text_cursor())
+    box = RoundFrame(parent, fill=T["BG3"], outline=T["BORDER"], pad=(9, 4), stretch=False)
+    e = _REntry(box.body, bg=T["BG3"], fg=T["FG"], insertbackground=T["FG"], relief="flat", font=F(0), bd=0,
+                width=width, highlightthickness=0, disabledbackground=T["BG3"], disabledforeground=T["FAINT"],
+                selectbackground=T["SEL"], selectforeground=T["FG"], cursor=text_cursor())
+    e._box = box
+    tk.Pack.pack_configure(e, fill="x", ipady=3)
+    round_focus(box, e)
     if show:
         e.config(show=show)
     if value:
@@ -672,11 +935,10 @@ def label(parent, text, muted=False, size=0, bold=False, wrap=0, color=None, **k
 
 
 def card(parent, title=None, subtitle=None):
-    """Блок настроек: рамка со скруглением не нужна — просто светлее фон и отступы."""
-    outer = tk.Frame(parent, bg=T["BG2"], highlightthickness=1, highlightbackground=T["BORDER"])
-    outer.pack(fill="x", padx=16, pady=(0, 12))
-    inner = tk.Frame(outer, bg=T["BG2"])
-    inner.pack(fill="x", padx=14, pady=12)
+    """Блок настроек: светлее фон, тонкая рамка, скруглённые углы (как карточки главного окна)."""
+    rf = RoundFrame(parent, fill=T["BG2"], outline=T["BORDER"], pad=(15, 13))
+    rf.pack(fill="x", padx=16, pady=(0, 12))
+    inner = rf.body
     if title:
         label(inner, title, size=1, bold=True).pack(anchor="w")
     if subtitle:

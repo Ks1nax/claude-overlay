@@ -233,13 +233,17 @@ class CaptureGuard:
         self._proc = None
         self._started = False
         self.errors = 0
+        # функция(hwnd) → True: окно должно быть «инструментом» (без панели задач и Alt+Tab). Проверяется только
+        # проходом раз в 0,5 с: в хуке нельзя — окно другого потока, обмен сообщениями с ним мог зависнуть
+        self.tool_check = None
 
     @property
     def want(self):
         return self.mode if self.enabled else WDA_NONE
 
     def install(self):
-        """Вызывать из главного потока Tk: события хука приходят в цикл сообщений этого потока."""
+        """Вызывать из потока с циклом сообщений (поток Tk): события хука приходят в этот цикл. Ловит окна всех
+        потоков программы — и окна Tk, и главное окно на движке Edge."""
         if not IS_WIN or self._started:
             return
         self._started = True
@@ -258,9 +262,13 @@ class CaptureGuard:
             return
         try:
             if user32.GetAncestor(hwnd, GA_ROOT) == hwnd:
-                self.apply(hwnd)
+                self.apply(hwnd)   # стиль окна здесь не трогаем: окно может принадлежать другому потоку (зависание)
         except Exception:
             pass
+
+    def _tool(self, hwnd):
+        if self.tool_check is not None and self.tool_check(hwnd):
+            ensure_tool_window(hwnd)
 
     def _sweeper(self):
         while True:
@@ -268,6 +276,7 @@ class CaptureGuard:
             try:
                 for h in process_windows(self.pid):
                     self.apply(h)
+                    self._tool(h)
             except Exception as e:
                 self.errors += 1
                 if self.errors < 5:

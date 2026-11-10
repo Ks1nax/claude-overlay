@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Главное окно оверлея (Tkinter): окно без рамки поверх всех, невидимое на демонстрации экрана.
-Все потоки общаются с окном только через очередь ui_q (_poll каждые 30 мс)."""
+"""Главное окно оверлея: интерфейс — на движке Edge (app/web, app/webwin.py), логика — здесь.
 
+Потоки: главный поток — цикл окна pywebview; поток «logic» — эта логика + служебные окна Tk (настройки, выделение
+куска экрана; корень Tk скрыт). Все остальные потоки общаются с логикой только через очередь ui_q (_poll каждые 30 мс),
+окно получает события через self.web.send(...)."""
+
+import base64
+import io
 import os
 import queue
 import subprocess
@@ -11,7 +16,7 @@ import time
 import tkinter as tk
 
 from . import winsys
-from .audio import Listener, SystemAudio, prepare_audio, level_bars, save_wav
+from .audio import Listener, SystemAudio, prepare_audio, level_fraction, save_wav
 from .claude import ClaudeSession, cli_ask, api_ask, explain_error, find_claude
 from .config import S, WORKDIR, HERE, LAST_F7_WAV, SETUP_STATE_PATH, load_api_key
 from .hotkeys import HotkeyManager, display as key_display, ACTIONS as HK_ACTIONS, current_binds
@@ -21,17 +26,50 @@ from .screen import grab_screen, encode_image
 from . import stt
 from . import providers
 from . import history
-from .textfmt import (MATH, CODE, md_segments, code_blocks, last_code_block, tex_rows, render_tex, warm_up_math,
-                      tex_to_text,
-                      split_wake, is_junk)
-from .ui_theme import (T, F, MONO, IS_WIN, IS_MAC, IconButton, ThinScroll, Tooltip, hand, text_cursor, init_fonts,
-                       state_color, apply_theme)
+from .textfmt import last_code_block, split_wake, is_junk
+from .ui_theme import T, THEMES, THEME_NAMES, init_fonts, apply_theme
 
-HEADER_H = 38
+BRAND = "Claude Overlay"
+CSS_KEYS = {"BG": "bg", "BG2": "bg2", "BG3": "bg3", "BG4": "bg4", "FG": "fg", "MUTED": "muted", "FAINT": "faint",
+            "ACCENT": "accent", "ACCENT2": "accent2", "CODE_BG": "code-bg", "CODE_FG": "code-fg", "IC_FG": "ic",
+            "ERR": "err", "OK": "ok", "WARN": "warn", "INFO": "info", "BORDER": "border", "SEL": "sel",
+            "PURPLE": "purple", "TEAL": "teal", "REC": "rec", "Q_BG": "qbg"}
+QUICK = {"Короче": "Скажи то же самое короче — одной-двумя фразами.",
+         "Подробнее": "Объясни подробнее, по шагам.",
+         "Объясни проще": "Объясни проще, как будто я только начал изучать тему.",
+         "Пример": "Приведи понятный пример."}
+
+
+def theme_vars(theme):
+    out = {css: theme[k] for k, css in CSS_KEYS.items()}
+    out["on-accent"] = "#1a0f0b" if theme.get("DARK_TITLE") else "#fffaf6"
+    return out
+
+
+def data_url(img, side, quality=82):
+    from PIL import Image
+    im = img.copy()
+    im.thumbnail((side, side), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.convert("RGB").save(buf, "JPEG", quality=quality)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def mat_icon(title):
+    t = title.lower()
+    if t.endswith(".pdf"):
+        return "picture_as_pdf"
+    if t.endswith((".doc", ".docx", ".rtf")):
+        return "description"
+    if t.endswith((".ppt", ".pptx")):
+        return "slideshow"
+    if t.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")):
+        return "image"
+    return "notes"
 
 
 class App:
-    def __init__(self, inst=None):
+    def __init__(self, inst=None, web=None):
         self.inst = inst
         self.ui_q = queue.Queue()
         self.audio_q = queue.Queue()
@@ -56,9 +94,15 @@ class App:
         self.mic_on = False
         self.stt_on = False
         self.state = ("loading", "Запуск…")
-        self.math_cache = {}
-        self.follow = True                      # держать текущий вопрос вверху окна (пока сам не листал)
+        self.math_cache = {}                    # (для совместимости с окном настроек)
         self.error_hint = ""
+        self.pending_shot = None
+        self.shots = {}                         # номер ответа → скриншот (для увеличения по щелчку)
+        self.next_source = "voice"
+        self.next_icon = None
+        self._status_last = None
+        self._rec_shown = False
+        self._quitting = False
 
         # вопросы со звука компьютера (F7)
         self.models = stt.Models()
@@ -71,8 +115,8 @@ class App:
         self.listen_seq = 0
         self.listen_model_state = ("loading", "")
         self.mic_model_info = ""
-        self.download_info = ""                 # «1,2 из 3,1 ГБ (40%)» — пока в фоне качается модель
-        self.via_listen = False                 # текущий ответ идёт через постоянную сессию
+        self.download_info = ""
+        self.via_listen = False
         self.cur_is_listen = False
         self._sys_announced = False
         self._sys_err_shown = False
@@ -80,6 +124,7 @@ class App:
 
         self.client = None
         self.cli = None
+        self.provider = None
         self.session_id = None
         self.session_gen = 0
         self.proc = None
@@ -89,22 +134,64 @@ class App:
         self.attach_busy = 0
         self.settings_win = None
         self.help_win = None
+        self.history_win = None
         self.tray = None
         self.listener = None
         self.transcriber = None
+        self.root = None
+        self.guard = None
+        self._logic_ready = threading.Event()
+
+        if web is None:
+            from .webwin import WebWindow
+            web = WebWindow(self)
+        self.web = web
+
+    # ------------------------------------------------------------ запуск
+    def run(self):
+        """Логика — в своём потоке, окно — в главном (так требует движок окна)."""
+        threading.Thread(target=self._logic_main, daemon=True, name="logic").start()
+        self._logic_ready.wait(30)
+        try:
+            self.web.start()
+        finally:
+            self._quit()
+
+    def _logic_main(self):
+        try:
+            self._setup()
+        except Exception:
+            import traceback
+            print("[ошибка] запуск:\n" + traceback.format_exc())
+            self._logic_ready.set()
+            raise
+        self._logic_ready.set()
+        self.root.mainloop()
+
+    def _setup(self):
+        """Всё, что раньше было в __init__: служебный корень Tk, невидимость, звук, распознавание, клавиши."""
+        r = self.root = tk.Tk()
+        r.withdraw()          # корень Tk не показывается: он нужен только для окон настроек и выделения куска экрана
+        r.title(BRAND + " · служебное")
+        init_fonts(r)
+        r.report_callback_exception = self._tk_error
+        # Невидимость на демонстрации экрана: хук защищает каждое новое окно программы в момент создания —
+        # и главное окно (его создаёт поток окна уже после этого), и окна настроек, и окна выбора файлов
+        from .webwin import is_main_window
+        self.guard = winsys.CaptureGuard(enabled=S.protect)
+        self.guard.tool_check = is_main_window
+        self.guard.install()
+
         backend_ok, problem = self._init_backend()
         self._write_prompts()
-
-        self._build_ui()
-        self._welcome(backend_ok, problem)
+        print("[запуск] режим:", self._mode_name() if backend_ok else "не настроен")
+        if not backend_ok:
+            self._write([(problem + "\n", ("err",))])
         if S.load_error:
             self._write([("⚠ " + S.load_error + "\n", ("err",))])
-
         if self.materials.items:
-            self._update_mat_bar()
             print("[материалы] с прошлого раза:", self.materials.summary())
-        if S.math_render:
-            threading.Thread(target=warm_up_math, args=(T["FG"], T["BG"]), daemon=True).start()
+
         self.transcriber = stt.Transcriber(self.audio_q, self.ui_q, self.models, self.listen_pause)
         self.transcriber.start()
         self.listener = Listener(self.audio_q, self.ui_q)
@@ -119,243 +206,129 @@ class App:
         if S.tray:
             self._start_tray()
         S.on_change(lambda changed: self.ui_q.put(("settings_changed", changed)))
+        r.after(30, self._poll)
+        r.after(1500, self._refresh_shield)
 
-        self.root.after(30, self._poll)
-
-    # ------------------------------------------------------------ UI build
-    def _build_ui(self):
-        r = self.root = tk.Tk()
-        r.withdraw()  # показываем только после того, как окно спрятано от захвата экрана
-        r.title("Claude Overlay")
-        init_fonts(r)
-        r.configure(bg=T["BORDER"])
-        if IS_WIN:
-            # окно-инструмент: нет кнопки на панели задач и в Alt+Tab. Ставить ДО overrideredirect и прозрачности:
-            # иначе Tk при смене прозрачности сбрасывает этот признак и окно вылезает на панель задач
-            r.attributes("-toolwindow", True)
-        r.overrideredirect(True)
-        r.attributes("-topmost", True)
-        try:
-            r.attributes("-alpha", float(S.alpha))
-        except tk.TclError:
-            pass
-        r.report_callback_exception = self._tk_error
+    def web_ready(self):
+        """Страница окна загрузилась (или перезагрузилась): всё состояние — заново."""
+        w = self.web
+        w.send("init", self._init_payload(), key="init")
         self._place_window()
-
-        outer = self.outer = tk.Frame(r, bg=T["BG"])
-        outer.pack(fill="both", expand=True, padx=1, pady=1)
-
-        head = self._head = tk.Frame(outer, bg=T["BG2"], height=HEADER_H)
-        head.pack(fill="x")
-        head.pack_propagate(False)
-        self.dot = tk.Canvas(head, width=12, height=12, bg=T["BG2"], highlightthickness=0, bd=0)
-        self.dot.pack(side="left", padx=(12, 6))
-        self._dot_item = self.dot.create_oval(1, 1, 11, 11, fill=T["MUTED"], outline="")
-        self.icons = {}
-        for name, glyph_name, cmd, tip in (
-                ("close", "close", self._quit, "Выход"),
-                ("hide", "hide", self.hide, f"Спрятать ({key_display(S.hotkey_toggle)})"),
-                ("compact", "compact", self.toggle_compact, "Компактно: только строка состояния"),
-                ("help", "info", self.toggle_info, "Подсказки: что можно сказать и нажать"),
-                ("settings", "settings", self.open_settings, "Настройки"),
-                ("history", "history", self.open_history, "История вопросов и ответов"),
-                ("new", "new", self.reset, "Новая задача (очистить диалог)"),
-                ("paste", "paste", self.paste_material, "Материалы: текст из буфера (Ctrl+V)"),
-                ("attach", "attach", self.pick_files, "Материалы: прикрепить файлы")):
-            b = IconButton(head, glyph_name, cmd, tip)
-            b.pack(side="right", padx=(0, 2) if name != "close" else (0, 6))
-            self.icons[name] = b
-        self.status_lbl = tk.Label(head, text="", bg=T["BG2"], fg=T["FG"], font=F(-1), anchor="w", width=1)
-        self.status_lbl.pack(side="left", fill="x", expand=True)
-        self.status_tip = Tooltip(self.status_lbl, "")
-        for w in (head, self.status_lbl, self.dot):
-            w.bind("<ButtonPress-1>", self._drag_start)
-            w.bind("<B1-Motion>", self._drag_move)
-            w.bind("<ButtonRelease-1>", self._drag_end)
-            w.bind("<Double-Button-1>", lambda e: self.toggle_compact())
-
-        self.mat_bar = tk.Frame(outer, bg=T["BG3"])
-        self.mat_lbl = tk.Label(self.mat_bar, text="", bg=T["BG3"], fg=T["PURPLE"], font=F(-2),
-                                anchor="w", justify="left")
-        self.mat_lbl.pack(side="left", fill="x", expand=True, padx=(12, 4), pady=4)
-        mat_x = tk.Label(self.mat_bar, text="✕ убрать", bg=T["BG3"], fg=T["MUTED"], font=F(-2), cursor=hand())
-        mat_x.pack(side="right", padx=8)
-        mat_x.bind("<Button-1>", lambda e: self.clear_materials())
-        self.mat_bar.bind("<Configure>", lambda e: self.mat_lbl.config(wraplength=max(100, e.width - 110)))
-
-        self.heard_lbl = tk.Label(outer, text="", bg=T["BG"], fg=T["MUTED"], font=F(-2), anchor="w", justify="left")
-        self.heard_lbl.pack(fill="x", padx=14, pady=(6, 0))
-        self.heard_lbl.bind("<Configure>", lambda e: self.heard_lbl.config(wraplength=max(100, e.width - 4)))
-
-        body = self.body = tk.Frame(outer, bg=T["BG"])
-        body.pack(fill="both", expand=True)
-        self.text = tk.Text(body, wrap="word", bg=T["BG"], fg=T["FG"], bd=0, highlightthickness=0,
-                            padx=14, pady=8, font=F(0), insertbackground=T["FG"], cursor=text_cursor(), height=1,
-                            selectbackground=T["SEL"], selectforeground=T["FG"], spacing1=2, spacing2=2, spacing3=3)
-        self.scroll = ThinScroll(body, self.text)
-        self.text.configure(yscrollcommand=self.scroll.set)
-        self.scroll.pack(side="right", fill="y", padx=(0, 2), pady=4)
-        self.text.pack(side="left", fill="both", expand=True)
-        self._config_tags()
-        self.text.config(state="disabled")
-        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.text.bind(ev, self._user_scrolled, add="+")
-        self.scroll.bind("<ButtonPress-1>", self._user_scrolled, add="+")  # тянет полосу — тоже «читает выше»
-        self.text.bind("<ButtonPress-1>", lambda e: self.text.focus_set(), add="+")
-        self.down_btn = IconButton(body, "down", self.scroll_to_last, "К последнему ответу", fg=T["FG"])
-        self.down_btn.config(bg=T["BG4"])
-        self.down_btn._bg = T["BG4"]
-        self._down_shown = False
-
-        foot = self.foot = tk.Frame(outer, bg=T["BG2"])
-        foot.pack(fill="x", side="bottom", before=body)  # нижняя строка всегда видна, ответ занимает остальное
-        grip = tk.Label(foot, text="◢", bg=T["BG2"], fg=T["FAINT"], font=F(-2))
-        grip.pack(side="right", anchor="se", padx=(2, 3))
-        grip.bind("<ButtonPress-1>", self._resize_start)
-        grip.bind("<B1-Motion>", self._resize_move)
-        grip.bind("<ButtonRelease-1>", self._drag_end)
-        self._build_ask_bar(outer, body)
-        self.shield_lbl = tk.Label(foot, text="", bg=T["BG2"], fg=T["MUTED"], font=F(-2), anchor="w",
-                                   cursor=hand())
-        self.shield_lbl.pack(side="left", padx=(12, 6), pady=5)
-        self.shield_lbl.bind("<Button-1>", lambda e: self.show_capture_check())
-        Tooltip(self.shield_lbl, "Проверить: показать снимок экрана таким, каким его видят на демонстрации")
-
-        r.protocol("WM_DELETE_WINDOW", self._quit)
-        # щелчок где угодно в окне (кроме самой кнопки «i») прячет подсказку
-        r.bind("<ButtonPress-1>", lambda e: self.toggle_info() if getattr(self, "info_win", None) is not None
-               and e.widget is not self.icons["help"] else None, add="+")
-        # Ctrl+V в окне — текст из буфера в материалы (по коду клавиши: работает и в русской раскладке)
-        r.bind("<Control-KeyPress>", self._on_ctrl_key)
-        self._setup_drop()
-
-        # Невидимость на демонстрации экрана: хук защищает каждое новое окно программы в момент создания
-        # (в том числе стандартное окно выбора файлов 📎 и сообщения), основное окно — ещё до показа.
-        self.guard = winsys.CaptureGuard(enabled=S.protect)
-        self.guard.install()
-        r.update_idletasks()
-        self.guard.protect_tk(r)
         if self.compact:
             self._apply_compact()
-        r.deiconify()
-        self.guard.protect_tk(r)
-        self._window_frame()
-        self._refresh_shield()
+        self._update_mat_bar()
+        self._status_last = None
+        self._refresh_status()
+        self._shield_last = None
+        self._refresh_shield(again=False)
+        if self.pending_shot is not None:
+            self.set_pending_shot(self.pending_shot)
+        w.mark_ready()
 
-    def _config_tags(self):
-        t = self.text
-        t.configure(font=F(0))
-        # вопрос — на подложке во всю ширину окна (фон перевода строки тянется до правого края)
-        t.tag_configure("user", foreground=T["ACCENT"], background=T["Q_BG"], font=F(0, "bold"), spacing1=6,
-                        spacing3=6, lmargin1=10, lmargin2=10, rmargin=10)
-        t.tag_configure("liveq", foreground=T["TEAL"], background=T["Q_BG"], font=F(0, "bold"), spacing1=6,
-                        spacing3=6, lmargin1=10, lmargin2=10, rmargin=10)
-        t.tag_configure("qpad", background=T["Q_BG"], font=F(-6))
-        t.tag_configure("meta", foreground=T["MUTED"], font=F(-2))
-        t.tag_configure("b", font=F(0, "bold"))
-        t.tag_configure("h", font=F(1, "bold"), spacing1=6)
-        t.tag_configure("ic", font=MONO(-1), background=T["CODE_BG"], foreground=T["IC_FG"])
-        t.tag_configure("code", font=MONO(-1), background=T["CODE_BG"], foreground=T["CODE_FG"],
-                        lmargin1=10, lmargin2=10, rmargin=6)
-        t.tag_configure("codehdr", font=F(-3), background=T["CODE_BG"], foreground=T["MUTED"], justify="right",
-                        lmargin1=10, lmargin2=10, rmargin=6, spacing1=4)
-        t.tag_configure("link", foreground=T["MUTED"], font=F(-3))
-        t.tag_configure("anslink", foreground=T["FAINT"], font=F(-3), justify="right", spacing1=2)
-        t.tag_configure("dm", justify="center", spacing1=4, spacing3=4)
-        t.tag_configure("mfall", font=(F()[0], S.font_size + 1, "italic"), foreground=T["FG"])
-        t.tag_configure("err", foreground=T["ERR"])
-        t.tag_configure("errhint", foreground=T["WARN"], font=F(-1))
-        t.tag_configure("sep", background=T["BORDER"], font=(F()[0], 1), spacing1=0, spacing2=0, spacing3=0)
-        t.tag_configure("gap", font=(F()[0], 4), spacing1=0, spacing2=0, spacing3=0)
-        t.tag_configure("helph", font=F(0, "bold"), foreground=T["ACCENT"], spacing1=6)
+    def _init_payload(self):
+        return {"brand": BRAND, "theme": self._theme_payload(), "fs": self._fs()["fs"], "hotkeys": self._hotkey_labels(),
+                "mode": self._mode_payload(), "protect": bool(S.protect), "math": bool(S.math_render),
+                "alpha": float(S.alpha), "ghost": bool(S.ghost), "ghost_fade": float(S.ghost_fade), "glass": False, "text_input": bool(S.text_input),
+                "compact": self.compact and not self.expanded_for_answer,
+                "themes": {k: {"name": THEME_NAMES.get(k, k), "bg": v["BG"], "accent": v["ACCENT"]} for k, v in THEMES.items()}}
 
-    def _update_hint(self):
-        if getattr(self, "info_win", None) is not None:  # клавиши поменялись — подсказка перерисуется
-            self.toggle_info()
+    @staticmethod
+    def _fs():
+        return {"fs": round(float(S.font_size) * 4 / 3)}
 
-    def _place_window(self):
-        r = self.root
-        sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
-        w = int(S.width or 560)
-        h = int(S.height or sh * 0.6)
-        x = S.pos_x if S.pos_x is not None else sw - w - 24
-        y = S.pos_y if S.pos_y is not None else 40
-        # положение могло остаться от второго монитора, которого больше нет — проверяем, что окно видно
-        vx, vy, vw, vh = self._virtual_screen()
-        if not (vx - w + 80 <= x <= vx + vw - 80 and vy <= y <= vy + vh - 60):
-            x, y = sw - w - 24, 40
-        self._full_h = h
-        r.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
+    @staticmethod
+    def _theme_payload():
+        return {"name": S.theme, "vars": theme_vars(T)}
 
-    def _virtual_screen(self):
-        if IS_WIN:
-            try:
-                import ctypes
-                gm = ctypes.windll.user32.GetSystemMetrics
-                return gm(76), gm(77), gm(78), gm(79)
-            except Exception:
-                pass
-        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+    @staticmethod
+    def _hotkey_labels():
+        return {"listen": key_display(S.hotkey_listen), "talk": key_display(S.hotkey_talk),
+                "toggle": key_display(S.hotkey_toggle), "region": key_display(S.hotkey_region),
+                "type": key_display(S.hotkey_type)}
+
+    def _mode_payload(self):
+        ok = bool(self.cli or self.client or self.provider)
+        return {"name": self._short_mode() if ok else "не настроено", "ok": ok}
+
+    def _short_mode(self):
+        if self.provider:
+            return f"{self.provider['title'].split(' (')[0].split(' —')[0]} · {self.provider['model']}"
+        if self.cli:
+            return f"Claude · {str(S.cli_model).capitalize()}"
+        return "Claude · " + str(S.api_model).replace("claude-", "").replace("-", " ").capitalize()
 
     def _tk_error(self, exc, val, tb):
         import traceback
         print("[ошибка окна]\n" + "".join(traceback.format_exception(exc, val, tb)))
         try:
-            self._write([(f"\nВнутренняя ошибка: {val}. Подробности — в журнале (⚙ → «Невидимость и система» → «Открыть журнал»).\n",
-                          ("err",))])
+            self._write([(f"Внутренняя ошибка: {val}. Подробности — в журнале (⚙ → «Невидимость и система» → "
+                          "«Открыть журнал»).\n", ("err",))])
         except Exception:
             pass
 
-    # ------------------------------------------------------------ окно: перетаскивание, размер, компактный режим
-    def _user_scrolled(self, _e=None):
-        self.follow = False
+    # ------------------------------------------------------------ окно: положение, размер, компактный режим
+    def initial_rect(self):
+        """Положение для создания окна (в логических пикселях: движок окна сам умножит на масштаб экрана)."""
+        try:
+            sc = ctypes_dpi() / 96.0
+        except Exception:
+            sc = 1.0
+        x, y, w, h = self._wanted_rect()
+        if self.compact:
+            h = int(HEAD_PX() * sc)
+        return int(x / sc), int(y / sc), int(w / sc), int(h / sc)
 
-    def _drag_start(self, e):
-        self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
-        self._dragged = False
+    def _wanted_rect(self):
+        sw, sh = screen_size()
+        w = int(S.width or 560)
+        h = int(S.height or sh * 0.6)
+        x = S.pos_x if S.pos_x is not None else sw - w - 24
+        y = S.pos_y if S.pos_y is not None else 40
+        # положение могло остаться от второго монитора, которого больше нет — проверяем, что окно видно
+        vx, vy, vw, vh = virtual_screen()
+        if not (vx - w + 80 <= x <= vx + vw - 80 and vy <= y <= vy + vh - 60):
+            x, y = sw - w - 24, 40
+        return int(x), int(y), w, h
 
-    def _drag_move(self, e):
-        self._dragged = True
-        self.root.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
-
-    def _drag_end(self, _e=None):
-        self._save_geometry()
-
-    def _resize_start(self, e):
-        self._rs = (e.x_root, e.y_root, self.root.winfo_width(), self.root.winfo_height())
-
-    def _resize_move(self, e):
-        x0, y0, w0, h0 = self._rs
-        w, h = max(340, w0 + e.x_root - x0), max(220, h0 + e.y_root - y0)
-        self.root.geometry(f"{w}x{h}")
+    def _place_window(self):
+        x, y, w, h = self._wanted_rect()
         self._full_h = h
+        if self.compact and not self.expanded_for_answer:
+            h = self._head_h()
+        self.web.set_rect(x, y, w, h)
+
+    def _head_h(self):
+        return int(round(HEAD_PX() * self.web.scale())) + 2
+
+    def window_height(self):
+        rc = self.web.rect()
+        return (rc[3] - rc[1]) if rc else int(S.height or 600)
 
     def _save_geometry(self):
         """Положение и размер запоминаются между запусками."""
-        r = self.root
-        vals = {"pos_x": r.winfo_x(), "pos_y": r.winfo_y(), "width": r.winfo_width()}
+        rc = self.web.rect()
+        if not rc:
+            return
+        x, y, r, b = rc
+        vals = {"pos_x": x, "pos_y": y, "width": r - x}
         if not self.compact or self.expanded_for_answer:
-            vals["height"] = r.winfo_height()
-            self._full_h = r.winfo_height()
+            vals["height"] = b - y
+            self._full_h = b - y
         S.update(**vals)
 
     def _geometry_matches(self):
-        """Совпадает ли окно с сохранёнными настройками (тогда ничего двигать не надо)."""
-        r = self.root
-        if S.pos_x is None or S.pos_y is None:
+        rc = self.web.rect()
+        if not rc or S.pos_x is None or S.pos_y is None:
             return False
-        same = (r.winfo_x(), r.winfo_y(), r.winfo_width()) == (S.pos_x, S.pos_y, int(S.width))
+        x, y, r, b = rc
+        same = (x, y, r - x) == (S.pos_x, S.pos_y, int(S.width))
         if not self.compact or self.expanded_for_answer:
-            same = same and (not S.height or r.winfo_height() == int(S.height))
+            same = same and (not S.height or b - y == int(S.height))
         return same
 
     def toggle_compact(self):
-        if self.compact and not self.expanded_for_answer:
-            self.expanded_for_answer = True   # развернуть на время
-            self._apply_compact()
-            return
-        if self.compact and self.expanded_for_answer:
-            self.expanded_for_answer = False
+        if self.compact:
+            self.expanded_for_answer = not self.expanded_for_answer   # развернуть на время / свернуть обратно
             self._apply_compact()
             return
         S.update(compact=True)
@@ -363,37 +336,38 @@ class App:
     def _apply_compact(self):
         """Компактный режим: только заголовок со статусом; при ответе окно разворачивается само."""
         small = self.compact and not self.expanded_for_answer
-        r = self.root
-        width = r.winfo_width() if r.winfo_width() > 100 else int(S.width or 560)  # до показа ширина ещё 1
-        if small:
-            for w in (self.mat_bar, self.heard_lbl, self.body, self.foot, self.ask_bar):
-                w.pack_forget()
-            r.geometry(f"{width}x{HEADER_H + 2}")
-            self.icons["compact"].set_glyph("expand")
-        else:
-            self.foot.pack(fill="x", side="bottom")
-            if S.text_input:
-                self.ask_bar.pack(fill="x", side="bottom")
-            self.heard_lbl.pack(fill="x", padx=14, pady=(6, 0))
-            self.body.pack(fill="both", expand=True)
-            self._update_mat_bar()
-            r.geometry(f"{width}x{max(220, int(self._full_h))}")
-            self.icons["compact"].set_glyph("compact")
+        rc = self.web.rect()
+        if rc:
+            x, y, r, b = rc
+            if small:
+                if b - y > self._head_h() + 20:
+                    self._full_h = b - y
+                self.web.set_rect(x, y, r - x, self._head_h())
+            else:
+                self.web.set_rect(x, y, r - x, max(220, int(getattr(self, "_full_h", 0) or S.height or 600)))
+        self.web.send("compact", {"on": small}, key="compact")
+        self._update_mat_bar()
 
     def _expand_for_answer(self):
         if self.compact and not self.expanded_for_answer:
             self.expanded_for_answer = True
             self._apply_compact()
 
-    # ------------------------------------------------------------ text helpers
+    # ------------------------------------------------------------ вывод в окно
     def _write(self, segments, at_end=True):
-        at_bottom = self.text.bbox("end-1c") is not None  # низ окна был виден — значит, никто не читает выше
-        self.text.config(state="normal")
-        for s, tags in segments:
-            self.text.insert("end", s, tags)
-        self.text.config(state="disabled")
-        if at_end and at_bottom:
-            self.text.see("end")
+        """Служебные строки в ленту: [(текст, (тег,…)), …] — теги err/errhint/meta определяют вид."""
+        for text, tags in segments:
+            text = (text or "").strip()
+            if not text:
+                continue
+            kind = "err" if "err" in tags else "hint" if "errhint" in tags else ""
+            self.web.send("sys", {"text": text, "kind": kind})
+
+    def heard(self, text, kind="", sticky=False):
+        self.web.send("heard", {"text": text, "kind": kind, "sticky": sticky}, key="heard")
+
+    def toast(self, text, icon="check"):
+        self.web.send("toast", {"text": text, "icon": icon})
 
     def _init_backend(self):
         self.client = self.cli = self.provider = None
@@ -418,8 +392,7 @@ class App:
         self.cli = find_claude()
         if not self.cli:
             return False, ("Не найден Claude Code — через него оверлей работает по твоей подписке. "
-                           "Открой мастер: ⚙ → «Невидимость и система» → «Проверить и починить» — он установит Claude Code "
-                           "и поможет войти.")
+                           "Открой мастер: ⚙ → «Проверить и починить» — он установит Claude Code и поможет войти.")
         os.makedirs(os.path.join(WORKDIR, "shots"), exist_ok=True)
         return True, ""
 
@@ -443,162 +416,81 @@ class App:
         with open(os.path.join(WORKDIR, "listen_prompt.txt"), "w", encoding="utf-8") as f:
             f.write(listen_prompt() + extra)
 
-    def _welcome(self, backend_ok, problem):
-        """Окно при запуске пустое — подсказки по кнопке «i» в заголовке. Здесь только то, что мешает работать."""
-        print("[запуск] режим:", self._mode_name() if backend_ok else "не настроен")
-        if not backend_ok:
-            self._write([(problem + "\n", ("err",))])
     def _render_answer(self, final=False):
-        # Пока пользователь не листал сам — держим вопрос в самом верху окна: ответ дописывается ниже
-        # и ничего не прыгает. Если листал — оставляем окно ровно там, где он читает.
-        keep = None
-        if not self.follow:
-            top = self.text.index("@0,0")
-            if self.text.compare(top, ">=", "ans_start"):
-                n = self.text.count("ans_start", top, "chars")
-                keep = (n[0] if isinstance(n, tuple) else n) or 0
-        self.text.config(state="normal")
-        self.text.delete("ans_start", "end-1c")
-        blocks = code_blocks(self.cur_answer)
-        for s, tags in md_segments(self.cur_answer, code_marks=True):
-            if s == MATH:
-                self._insert_math(*tags)
-            elif s == CODE:
-                n = tags[0]
-                tag = f"cp{self.ans_no}_{n}"
-                self.text.insert("end", "\n" if self.text.get("end-2c") != "\n" else "")
-                self.text.insert("end", "⧉ Копировать" + (f" · {tags[1]}" if tags[1] else ""), ("codehdr", tag))
-                self.text.insert("end", "\n", ("codehdr",))
-                if n < len(blocks):
-                    self._bind_link(tag, lambda b=blocks[n]: self._copy_text(b, "код"))
-            else:
-                self.text.insert("end", s, tags)
-        self.text.config(state="disabled")
-        if self.follow:
-            self.text.yview("q_start")
-        elif keep is not None:
-            self.text.yview(f"ans_start + {keep} chars")
+        self.web.send("answer", {"id": self.ans_no, "md": self.cur_answer, "final": final}, key=f"ans{self.ans_no}")
         self.dirty = False
         self.last_render = time.time()
 
-    def _bind_link(self, tag, func):
-        """Ссылка «Копировать». Привязка делается один раз на тег (перерисовка идёт ~16 раз в секунду —
-        иначе копились бы тысячи команд Tcl), а что копировать — берётся из словаря."""
-        links = self.__dict__.setdefault("_links", {})
-        first = tag not in links
-        links[tag] = func
-        if not first:
-            return
-        t = self.text
-        t.tag_bind(tag, "<Button-1>", lambda e: links[tag]())
-        t.tag_bind(tag, "<Enter>", lambda e: t.tag_configure(tag, foreground=T["FG"], underline=True))
-        t.tag_bind(tag, "<Leave>", lambda e: t.tag_configure(tag, foreground="", underline=False))
-
     def _copy_text(self, text, what):
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.heard_lbl.config(text=f"Скопировано: {what} ({len(text)} знаков)")
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()   # чтобы буфер сразу видели другие программы
+        except tk.TclError as e:
+            print("[буфер] не удалось скопировать:", e)
+            return
+        self.toast(f"Скопировано: {what}", "content_copy")
 
-    def _math_image(self, tex, display):
-        """Строки формулы: картинка (PhotoImage) или, если нарисовать не вышло, читаемый текст (str). С кэшем."""
-        key = (tex, display, S.font_size)
-        if key in self.math_cache:
-            return self.math_cache[key]
-        from PIL import Image, ImageTk
-        dpi = self.root.winfo_fpixels("1i")
-        size = S.font_size + (5 if display else 2)
-        max_w = max(self.text.winfo_width() - 40, 200)
-        out = []
-        for row in tex_rows(tex, display):  # каждая строка отдельно: одна неудачная не портит остальные
-            try:
-                im = render_tex(row, size, dpi, T["FG"], T["BG"], pad=0.03 if display else 0.005)
-                if im.width > max_w:  # длинная формула — уменьшаем под ширину окна
-                    im = im.resize((max_w, max(1, int(im.height * max_w / im.width))), Image.LANCZOS)
-                out.append(ImageTk.PhotoImage(im))
-            except Exception as e:
-                print("[math] не удалось нарисовать:", row, "→", str(e).strip().splitlines()[-1][:120] if str(e) else e)
-                out.append(tex_to_text(row))
-        self.math_cache[key] = out
-        return out
-
-    def _insert_math(self, tex, display):
-        rows = self._math_image(tex, display) or [tex_to_text(tex)]
-        for i, item in enumerate(rows):
-            start = self.text.index("end-1c")
-            if isinstance(item, str):  # запасной вид: обычный текст (½, λ, ·, √), а не исходный код формулы
-                self.text.insert("end", item, ("mfall",))
-            else:
-                name = self.text.image_create("end", image=item, align="center", padx=1)
-                self.__dict__.setdefault("math_names", {})[name] = (tex, display, i)  # для перерисовки темы
-            if display:
-                self.text.insert("end", "\n")
-                self.text.tag_add("dm", start, "end-1c")
-    def _begin_exchange(self, question, with_screen, live=False, icon="🎧"):
+    def _begin_exchange(self, question, img=None, region=False, src="voice", listen=False):
         self.ans_no += 1
-        self.text.config(state="normal")
-        if self.text.compare("end-1c", ">", "1.0"):
-            self.text.insert("end", "\n" if self.text.get("end-2c") != "\n" else "")
-            self.text.insert("end", "\n", ("gap",))
-            self.text.insert("end", " \n", ("sep",))  # тонкая линия во всю ширину между вопросами
-            self.text.insert("end", "\n", ("gap",))
-        self.text.mark_set("q_start", "end-1c")
-        self.text.mark_gravity("q_start", "left")
-        if live:
-            self.text.insert("end", icon + " " + question + "\n", ("liveq",))
-        else:
-            self.text.insert("end", ("⌨ " if icon == "⌨" else "› ") + question + "\n", ("user",))
-        if not with_screen and not live:
-            self.text.insert("end", "(без скриншота)\n", ("meta",))
-        self.text.insert("end", "\n", ("gap",))  # немного воздуха между вопросом и ответом
-        self.text.mark_set("ans_start", "end-1c")
-        self.text.mark_gravity("ans_start", "left")
-        self.text.config(state="disabled")
-        self.follow = True
-        self.text.yview("q_start")
+        meta = ("кусок экрана" if region else "со скриншотом") if img is not None else ("" if listen else "без скриншота")
+        thumb = None
+        if img is not None:
+            try:
+                thumb = data_url(img, 240, 75)
+                self.shots[self.ans_no] = img
+                for k in sorted(self.shots)[:-20]:
+                    self.shots.pop(k, None)
+            except Exception as e:
+                print("[окно] миниатюра:", e)
+        self.web.send("begin", {"id": self.ans_no, "question": question, "src": src, "meta": meta, "thumb": thumb})
         self.cur_question, self.cur_answer = question, ""
 
-    def scroll_to_last(self):
-        """Кнопка «вниз»: к последнему вопросу (он встаёт вверх окна), дальше окно снова держит его."""
-        self.follow = True
-        try:
-            self.text.yview("q_start")
-        except tk.TclError:
-            self.text.see("end")
-        if self.text.bbox("end-1c") is None:
-            self.text.see("end")
+    def shot_preview(self, sid):
+        img = self.shots.get(sid)
+        return data_url(img, 1600, 88) if img is not None else None
 
-    def _update_down_btn(self):
-        need = self.text.bbox("end-1c") is None and not self.follow
-        if need != self._down_shown:
-            self._down_shown = need
-            if need:
-                self.down_btn.place(relx=1.0, rely=1.0, x=-22, y=-10, anchor="se")
-            else:
-                self.down_btn.place_forget()
-
-    # ------------------------------------------------------------ status
+    # ------------------------------------------------------------ строка состояния
     def set_state(self, state, msg):
         self.state = (state, msg)
         self._refresh_status()
 
     def _refresh_status(self):
         state, msg = self.state
-        listen = self._listen_status()
-        if listen:
-            color, msg = listen
+        step = None
+        stages = {j.get("stage") for j in self.listen_jobs.values()}
+        if self.rec:
+            step, msg = "hear", "Запись вопроса со звука компьютера"
+        elif "tail" in stages:
+            step, msg = "hear", "Дослушиваю секунду…"
+        elif "stt" in stages:
+            step, msg = "stt", "Распознаю вопрос…" + (" (точная модель ещё загружается)"
+                                                      if self.listen_model_state[0] != "ready" else "")
+        elif self.busy:
+            step = "answer" if state == "answer" else "think"
         elif self.mic_on:
-            color, msg = T["ACCENT"], "🎙 Слышу…" if not self.busy else msg + "  · 🎙"
-        elif self.stt_on and not self.busy:
-            color, msg = state_color("stt"), "Распознаю команду…"
-        else:
-            color = state_color(state)
-        if (color, msg) != getattr(self, "_status_last", None):
-            self._status_last = (color, msg)
-            self.dot.itemconfigure(self._dot_item, fill=color)
-            self.status_lbl.config(text=msg)
-            self.status_tip.text = msg if len(msg) > 40 else ""
-        if self.rec:  # мигающая точка во время записи
-            self.dot.itemconfigure(self._dot_item, fill=color if int(time.time() * 2) % 2 else T["BG4"])
+            step, msg = "hear", "Слышу…"
+        elif self.stt_on:
+            step, msg = "stt", "Распознаю команду…"
+        payload = {"step": step, "text": msg, "state": state}
+        if payload != self._status_last:
+            self._status_last = payload
+            self.web.send("status", payload, key="status")
+
+    def _refresh_rec(self):
+        stages = {j.get("stage") for j in self.listen_jobs.values()}
+        if self.rec:
+            el = int(time.time() - self.rec["press"])
+            lvl = level_fraction(self.sysaudio.level(0.15)) if self.sysaudio else 0.0
+            self.web.send("rec", {"on": True, "time": f"{el // 60}:{el % 60:02d}", "level": lvl}, key="rec")
+            self._rec_shown = True
+        elif "tail" in stages:
+            lvl = level_fraction(self.sysaudio.level(0.15)) if self.sysaudio else 0.0
+            self.web.send("rec", {"on": True, "tail": True, "time": "", "level": lvl}, key="rec")
+            self._rec_shown = True
+        elif self._rec_shown:
+            self._rec_shown = False
+            self.web.send("rec", {"on": False}, key="rec")
 
     def _idle(self):
         if not self.ready or self.fatal:
@@ -609,13 +501,13 @@ class App:
         elif now < self.followup_until:
             self.set_state("followup", f"Можно дополнить без «Клод» ({int(self.followup_until - now) + 1} с)")
         elif self.download_info:
-            self.set_state("download", f"⬇ Качаю модель распознавания: {self.download_info}")
+            self.set_state("download", f"Качаю модель распознавания: {self.download_info}")
         elif self.error_hint:
             self.set_state("error", self.error_hint)
         else:
             self.set_state("idle", f"Жду «Клод, …» или {key_display(S.hotkey_listen)}")
 
-    # ------------------------------------------------------------ main loop
+    # ------------------------------------------------------------ главный цикл
     def _poll(self):
         try:
             while True:
@@ -625,32 +517,23 @@ class App:
         except Exception as e:
             import traceback
             print("[ошибка] обработка события:\n" + traceback.format_exc())
-            self._write([(f"\nВнутренняя ошибка: {e}\n", ("err",))])
+            self._write([(f"Внутренняя ошибка: {e}\n", ("err",))])
         if self.dirty and time.time() - self.last_render > 0.06:
             self._render_answer()
         if self.rec and time.time() - self.rec["press"] > S.listen_max_seconds:
             self.listen_finish()
         if not self.busy and self.ready:
             self._idle()
-        elif self.rec or self.listen_jobs:
+        else:
             self._refresh_status()
         now = time.time()
+        if now - getattr(self, "_rec_tick", 0) > 0.06:
+            self._rec_tick = now
+            self._refresh_rec()
         if now - getattr(self, "_slow_tick", 0) > 0.25:
             self._slow_tick = now
-            self._update_down_btn()
-            self._unminimize()
+            self.web.unminimize()
         self.root.after(30, self._poll)
-
-    def _unminimize(self):
-        """Win+D / «свернуть все» сворачивают и наше окно — оно превращается в серую полоску в углу экрана.
-        Сразу разворачиваем обратно (спрятать окно можно клавишей или «Клод, скрой»)."""
-        try:
-            if self.visible and self.root.state() == "iconic":
-                self.root.deiconify()
-                self.root.attributes("-topmost", True)
-                self.guard.protect_tk(self.root)
-        except tk.TclError:
-            pass
 
     def _handle(self, msg):
         kind = msg[0]
@@ -663,12 +546,13 @@ class App:
         elif kind == "fatal":
             self.fatal = True
             self.set_state("error", "Ошибка — подробности в окне")
-            self._write([("\n" + msg[1] + "\n", ("err",))])
+            self._write([(msg[1] + "\n", ("err",))])
         elif kind == "mic_error":
             self.error_hint = "Микрофон не работает — ⚙ → Звук"
-            self._write([("\n🎙 " + msg[1] + " Вопросы со звука компьютера работают и без микрофона.\n", ("err",))])
+            self._write([("Микрофон: " + msg[1] + " Вопросы со звука компьютера работают и без микрофона.\n", ("err",))])
         elif kind == "mic":
             self.mic_on = msg[1]
+            self.web.send("mic", {"on": bool(msg[1])}, key="mic")
             self._refresh_status()
         elif kind == "stt":
             self.stt_on = msg[1]
@@ -689,7 +573,7 @@ class App:
                 self._finish(error=msg[2])
         elif kind == "interrupted":
             if msg[1] == self.rid and self.busy:
-                self._finish(note="[прервано: поменялись материалы или настройки — спроси ещё раз]")
+                self._finish(note="Прервано: поменялись материалы или настройки — спроси ещё раз.")
         elif kind == "session":
             if msg[1] == self.session_gen:
                 self.session_id = msg[2]
@@ -713,32 +597,32 @@ class App:
         elif kind == "sys_audio":
             self.on_sys_audio()
         elif kind == "mat_status":
-            self._write([(msg[1] + "\n", ("meta",))])
+            self.heard(msg[1], sticky=True)
         elif kind == "mat_add":
             self.materials.add(msg[1], msg[2], msg[3])
-            self._write([(f"📎 Добавлено: {msg[1]} ({msg[3]}, {len(msg[2]):,} знаков)\n".replace(",", " "), ("meta",))])
+            self._write([(f"Материал добавлен: {msg[1]} ({msg[3]}, {len(msg[2]):,} знаков)\n".replace(",", " "), ("meta",))])
         elif kind == "mat_err":
-            self._write([(f"📎 {msg[1]}: {msg[2]}\n", ("err",))])
+            self._write([(f"{msg[1]}: {msg[2]}\n", ("err",))])
         elif kind == "mat_done":
             self.attach_busy = max(0, self.attach_busy - 1)
+            self.heard("")
             if msg[1]:
                 self._apply_materials(analyze=True)
         elif kind == "toggle":
             self.toggle()
         elif kind == "show":
             self.show()
-            self.root.lift()
         elif kind == "settings_changed":
             self._on_settings(msg[1])
         elif kind == "tray":
             {"toggle": self.toggle, "settings": self.open_settings, "wizard": self.open_wizard,
              "quit": self._quit}.get(msg[1], lambda: None)()
-        elif kind == "call":   # выполнить функцию в потоке окна (для окна настроек и проверок)
+        elif kind == "call":   # выполнить функцию в потоке логики (окно, настройки, проверки)
             msg[1]()
         elif kind == "quit":   # мастер попросил закрыться на время настройки
             self._quit()
 
-    # ------------------------------------------------------------ voice commands
+    # ------------------------------------------------------------ голосовые команды
     def on_heard(self, text):
         text = (text or "").strip()
         if not text or is_junk(text):
@@ -749,11 +633,11 @@ class App:
             if now < self.forced_until or now < self.followup_until:
                 body = text
             else:
-                self.heard_lbl.config(text="(не мне) " + text)
+                self.heard("Не мне: " + text, "notme")
                 print(f"[микрофон] фраза без «Клод» ({len(text.split())} слов) — не мне")  # чужую речь не пишем
                 return
         print(f"[микрофон] команда: {text}")
-        self.heard_lbl.config(text="Услышал: " + text)
+        self.heard("Услышал: " + text)
         self.forced_until = 0.0
         self.followup_until = 0.0
         self.command(body.strip(" ,.:;!?-—…"))
@@ -775,7 +659,7 @@ class App:
             return
 
         if words[0] in ("стоп", "хватит", "отмена", "отбой", "замолчи", "остановись", "стой"):
-            self.cancel(note="[остановлено]")
+            self.cancel(note="Остановлено.")
             return
 
         if low in ("скрой", "скройся", "спрячь", "спрячься", "скрой окно", "убери окно", "свернись"):
@@ -786,12 +670,10 @@ class App:
             return
 
         if len(words) <= 3 and any(w in words for w in ("вниз", "ниже", "листай")):
-            self.follow = False
-            self.text.yview_scroll(8, "units")
+            self.web.send("scroll", {"dir": "down"})
             return
         if len(words) <= 3 and any(w in words for w in ("вверх", "выше", "наверх")):
-            self.follow = False
-            self.text.yview_scroll(-8, "units")
+            self.web.send("scroll", {"dir": "up"})
             return
 
         if words[0] in ("скопируй", "копируй", "скопировать") and len(words) <= 4:
@@ -816,13 +698,21 @@ class App:
 
         self.ask(body, screen=S.screen_question)
 
-    # ------------------------------------------------------------ actions
+    def quick(self, kind):
+        """Кнопки под ответом: «Короче», «Подробнее», «Объясни проще», «Пример» — уточнение в том же диалоге."""
+        prompt = QUICK.get(kind)
+        if not prompt:
+            return
+        self.next_source, self.next_icon = "text", "quick"
+        self.ask(kind, screen=False, prompt=prompt)
+
+    # ------------------------------------------------------------ вопрос
     def ask(self, question, screen=True, prompt=None, listen=False, icon="🎧"):
         if self.busy:
-            self.cancel(note="[прервано новым вопросом]")
+            self.cancel(note="Прервано новым вопросом.")
         if not self.client and not self.cli and not self.provider:
-            self._write([("\nНе настроено подключение к Claude (см. сообщение выше). Открой мастер: "
-                          "⚙ → «Невидимость и система» → «Проверить и починить».\n", ("err",))])
+            self._write([("Не настроено подключение к ИИ (см. сообщение выше). Открой мастер: "
+                          "⚙ → «Проверить и починить».\n", ("err",))])
             return
         use_session = bool(listen and self.cli)
         self.show()
@@ -831,7 +721,8 @@ class App:
 
         img = None
         hidden = False
-        region = getattr(self, "pending_shot", None)
+        region = self.pending_shot
+        used_region = False
         if screen and region is not None:  # заранее выделенный кусок экрана — вместо всего монитора
             self.set_pending_shot(None)
             img = region.copy()
@@ -839,14 +730,15 @@ class App:
             from PIL import Image
             img.thumbnail((side, side), Image.LANCZOS)
             screen = False
+            used_region = True
         if screen:
             self.set_state("think", "Делаю скриншот…")
-            xy = (self.root.winfo_pointerx(), self.root.winfo_pointery())
+            xy = cursor_xy()
             hidden = self._hide_for_capture()
             try:
                 img = grab_screen(xy, S.listen_image_side if listen else S.max_image_side)
             except Exception as e:
-                self._write([(f"\nНе удалось сделать скриншот: {e}\n", ("err",))])
+                self._write([(f"Не удалось сделать скриншот: {e}\n", ("err",))])
             finally:
                 self._restore_after_capture(hidden)
 
@@ -860,13 +752,13 @@ class App:
             content.append({"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}})
         content.append({"type": "text", "text": text})
 
-        source = getattr(self, "next_source", "voice")
-        self.next_source = "voice"
+        source, src_icon = self.next_source, self.next_icon
+        self.next_source, self.next_icon = "voice", None
         self.cur_source = "f7" if listen and icon == "🎧" else "materials" if icon == "📎" else source
-        self._begin_exchange(question, img is not None, live=listen, icon="⌨" if self.cur_source == "text" else icon)
+        self._begin_exchange(question, img, used_region, src=src_icon or self.cur_source, listen=listen)
         self.ask_t0 = time.time()
         print(f"[вопрос] {self.cur_source}, "
-              + ("без скриншота" if img is None else "выделенный кусок экрана" if region is not None else
+              + ("без скриншота" if img is None else "выделенный кусок экрана" if used_region else
                  ("скриншот — окно не пряталось (оно и так невидимо)" if not hidden else
                   "скриншот — окно на миг пряталось (невидимость недоступна)")))
         self.set_state("think", "Думаю…")
@@ -910,28 +802,17 @@ class App:
         return path
 
     def _hide_for_capture(self):
-        if not self.visible:
+        if not self.web.visible:
             return False
-        if self.guard.fully_hidden():
+        if self.guard is not None and self.guard.fully_hidden():
             return False  # окна и так нет в захвате экрана — прятать не нужно, ничего не мигает
-        if IS_WIN or IS_MAC:
-            self.root.attributes("-alpha", 0.0)
-        else:
-            self.root.withdraw()
-        self.root.update()
-        time.sleep(0.15)
+        self.web.hide()
+        time.sleep(0.2)
         return True
 
     def _restore_after_capture(self, hidden):
-        if not hidden:
-            return
-        if IS_WIN or IS_MAC:
-            self.root.attributes("-alpha", float(S.alpha))
-        else:
-            self.root.deiconify()
-            self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
-        self.guard.protect_tk(self.root)
+        if hidden:
+            self.web.show()
 
     def _messages(self):
         hist = self.history[-S.max_history_messages:]
@@ -985,18 +866,15 @@ class App:
                 self.history.append({"role": "assistant", "content": answer + ("\n" + note if note else "")})
             elif self.history and self.history[-1]["role"] == "user":
                 self.history.pop()
-        self._render_answer(final=True)
-        if answer and not error:
-            tag = f"cpa{self.ans_no}"
-            self._write([("⧉ Копировать ответ\n", ("anslink", tag))], at_end=False)
-            self._bind_link(tag, lambda a=answer: self._copy_text(a, "ответ"))
+        hint = ""
         if error:
             hint = (providers.explain(str(error)) if self.provider else "") or explain_error(error)
             print("[claude] ошибка:", error)
-            self._write([(f"\nОшибка: {error}\n", ("err",))] + ([("→ " + hint + "\n", ("errhint",))] if hint else []))
             self.error_hint = "Ошибка — что делать, написано в окне"
-        elif note:
-            self._write([(note + "\n", ("meta",))])
+        self.dirty = False
+        self.web.send("finish", {"id": self.ans_no, "md": self.cur_answer, "error": str(error) if error else "",
+                                 "hint": hint or "", "note": note or "", "quick": bool(answer and not error),
+                                 "fix": bool(error)})
         # после ответа на вопрос с компьютера «дополнить без Клод» не включаем: микрофон может слышать колонки
         if not error and not note and S.followup_seconds and not was_listen:
             self.followup_until = time.time() + S.followup_seconds
@@ -1014,7 +892,7 @@ class App:
         if sa is None:
             return
         if sa.state == "error":
-            self._write([("\n🎧 " + sa.error + "\n", ("err",))])
+            self._write([("Звук компьютера: " + sa.error + "\n", ("err",))])
             sa.refresh_if_stale()
             return
         sa.refresh_if_stale()  # переключили наушники/колонки — откроем устройства заново
@@ -1025,7 +903,9 @@ class App:
         if self.cli:
             self._ensure_listen_session()  # Claude прогревается, пока идёт запись
         self.show()
+        self._expand_for_answer()
         self._refresh_status()
+        self._refresh_rec()
 
     def listen_finish(self):
         job, self.rec = self.rec, None
@@ -1042,7 +922,7 @@ class App:
             return
         self.rec = None
         self._listen_update_pause()
-        self._write([("🎧 Запись вопроса отменена.\n", ("meta",))])
+        self.toast("Запись вопроса отменена", "close")
         self._idle()
         self._refresh_status()
 
@@ -1054,7 +934,7 @@ class App:
         if audio is None or len(audio) < rate * 0.3:
             self.listen_jobs.pop(job_id, None)
             self._listen_update_pause()
-            self._write([("\n🎧 За эти секунды компьютер не играл звук — распознавать нечего. Если звук был, "
+            self._write([("За эти секунды компьютер не играл звук — распознавать нечего. Если звук был, "
                           "проверь устройство вывода: ⚙ → Звук.\n", ("err",))])
             self._idle()
             self._refresh_status()
@@ -1079,13 +959,13 @@ class App:
         if job is None:
             return
         if err:
-            self._write([(f"\n🎧 {err}\n", ("err",))])
+            self._write([(f"Звук компьютера: {err}\n", ("err",))])
             self._idle()
             return
         text = (text or "").strip()
         print(f"[F7] {job['dur']:.1f} с звука («{job['dev']}»), язык {lang or '?'}, распознано за {secs:.1f} с: {text}")
         if not text or is_junk(text):
-            self._write([("\n🎧 В записи не нашлось речи.\n", ("meta",))])
+            self._write([("В записи не нашлось речи.\n", ("meta",))])
             self._idle()
             return
         prompt = (f"Фрагмент звука с компьютера ({job['dur']:.0f} с" + (f", язык: {lang}" if lang else "")
@@ -1098,28 +978,11 @@ class App:
         else:
             self.listen_pause.clear()
 
-    def _listen_status(self):
-        """Строка состояния для F7 (или None, если ничего не пишем и не распознаём)."""
-        k = key_display(S.hotkey_listen)
-        if self.rec:
-            el = int(time.time() - self.rec["press"])
-            lvl = level_bars(self.sysaudio.level()) if self.sysaudio else ""
-            return T["REC"], f"🔴 Запись вопроса {el // 60}:{el % 60:02d}  {lvl}  · {k} — готово · Esc — отмена"
-        stages = {j.get("stage") for j in self.listen_jobs.values()}
-        if "tail" in stages:
-            return T["TEAL"], "⏳ Дослушиваю секунду…"
-        if "stt" in stages:
-            msg = "📝 Распознаю вопрос…"
-            if self.listen_model_state[0] != "ready":
-                msg += " (точная модель ещё загружается)"
-            return T["TEAL"], msg
-        return None
-
     def on_mic_model(self, state, info):
         if state == "progress":
             self.download_info = info.get("text", "") if isinstance(info, dict) else str(info)
             if not self.ready:
-                self.set_state("download", f"⬇ Скачиваю модель распознавания команд: {self.download_info}")
+                self.set_state("download", f"Скачиваю модель распознавания команд: {self.download_info}")
             return
         if state == "loading":
             print(f"[whisper] команды: загружаю {info}")
@@ -1127,11 +990,11 @@ class App:
             self.download_info = ""
             self.mic_model_info = info
             if self.ready and getattr(self, "_mic_model_switch_shown", False):
-                self._write([(f"🎙 Команды: теперь распознаёт {info}.\n", ("meta",))])
+                self._write([(f"Команды: теперь распознаёт {info}.\n", ("meta",))])
             self._mic_model_switch_shown = True
         elif state == "error":
             self.download_info = ""
-            self._write([(f"🎙 Модель для команд не загрузилась ({info}) — осталась прежняя.\n", ("err",))])
+            self._write([(f"Модель для команд не загрузилась ({info}) — осталась прежняя.\n", ("err",))])
 
     def on_listen_model(self, state, info):
         if state == "progress":
@@ -1142,27 +1005,27 @@ class App:
         if state == "download":
             now = self.listen_model_state[1] if self.listen_model_state[0] == "ready" else ""
             size = stt.fmt_size(stt.model_size_bytes(info))
-            self._write([(f"🎧 В фоне качаю модель распознавания {info} (~{size}, один раз)"
+            self._write([(f"В фоне качаю модель распознавания {info} (~{size}, один раз)"
                           + (f". {key_display(S.hotkey_listen)} пока работает на {now.split(' ·')[0]}" if now else "")
                           + ".\n", ("meta",))])
             return
         if state == "upgraded":
             self.download_info = ""
             self.listen_model_state = ("ready", info)
-            self._write([(f"🎧 {key_display(S.hotkey_listen)}: теперь распознаёт {info}.\n", ("meta",))])
+            self._write([(f"{key_display(S.hotkey_listen)}: теперь распознаёт {info}.\n", ("meta",))])
             return
         if state == "upgrade_fail":
             self.download_info = ""
-            self._write([(f"🎧 Модель не загрузилась ({info}) — {key_display(S.hotkey_listen)} работает на прежней.\n",
+            self._write([(f"Модель не загрузилась ({info}) — {key_display(S.hotkey_listen)} работает на прежней.\n",
                           ("meta",))])
             return
         self.listen_model_state = (state, info)
         if state == "ready":
             print(f"[whisper] звук компьютера готов: {info}")
         elif state == "fallback":
-            self._write([(f"🎧 Точная модель не загрузилась ({info}) — будет модель микрофона.\n", ("err",))])
+            self._write([(f"Точная модель не загрузилась ({info}) — будет модель микрофона.\n", ("err",))])
         elif state == "error":
-            self._write([(f"\n🎧 Вопросы со звука компьютера не будут работать: {info}\n", ("err",))])
+            self._write([(f"Вопросы со звука компьютера не будут работать: {info}\n", ("err",))])
 
     def on_sys_audio(self):
         sa = self.sysaudio
@@ -1174,7 +1037,7 @@ class App:
             print(f"[звук] слушаю устройств: {len(sa.devices)}{main}")
         elif sa.state == "error" and not self._sys_err_shown:
             self._sys_err_shown = True
-            self._write([("\n🎧 " + sa.error + "\n", ("err",))])
+            self._write([("Звук компьютера: " + sa.error + "\n", ("err",))])
 
     def _ensure_listen_session(self):
         if self.listen_session is None:
@@ -1185,14 +1048,9 @@ class App:
 
     # ------------------------------------------------------------ материалы (📎)
     def pick_files(self):
-        from tkinter import filedialog
-        # окно выбора файлов — стандартное окно Windows; хук невидимости прячет его от захвата в момент создания
-        paths = filedialog.askopenfilenames(
-            parent=self.root, title="Материалы для Claude: лекции, конспекты, вопросы",
-            filetypes=[("Документы и картинки", "*.pdf *.docx *.pptx *.txt *.md *.png *.jpg *.jpeg *.webp"),
-                       ("Все файлы", "*.*")])
-        if paths:
-            self.attach_files(list(paths))
+        """Окно выбора файлов (стандартное окно Windows; хук невидимости прячет его от захвата в момент создания)."""
+        from .webwin import Bridge
+        threading.Thread(target=Bridge(self).pick_files, daemon=True).start()
 
     def paste_material(self):
         try:
@@ -1205,48 +1063,7 @@ class App:
         elif text.strip():
             self.attach_text(text, "Текст из буфера")
         else:
-            self._write([("📋 В буфере обмена нет текста. Скопируй текст (Ctrl+C) и нажми 📋 ещё раз.\n", ("meta",))])
-
-    def _on_ctrl_key(self, e):
-        if self.root.focus_get() is getattr(self, "entry", None):
-            return None  # в поле вопроса Ctrl+V/C/A работают как обычно
-        if e.keycode == 86 or (e.keysym or "").lower() == "v":  # V — и в русской раскладке
-            self.paste_material()
-            return "break"
-        if e.keycode == 67 or (e.keysym or "").lower() == "c":  # Ctrl+C — скопировать выделенное
-            try:
-                sel = self.text.get("sel.first", "sel.last")
-            except tk.TclError:
-                sel = ""
-            if sel:
-                self._copy_text(sel, "выделенный текст")
-            return "break"
-
-    def _setup_drop(self):
-        """Перетаскивание файлов и текста в окно (если доступна библиотека tkinterdnd2)."""
-        try:
-            from tkinterdnd2 import TkinterDnD, DND_FILES, DND_TEXT
-            TkinterDnD._require(self.root)
-            for w in (self.text, self._head, self.status_lbl, self.heard_lbl, self.mat_lbl):
-                w.drop_target_register(DND_FILES, DND_TEXT)
-                w.dnd_bind("<<Drop>>", self._on_drop)
-            self.drop_ok = True
-        except Exception as e:
-            self.drop_ok = False
-            print("[📎] перетаскивание файлов недоступно:", e)
-
-    def _on_drop(self, event):
-        data = event.data or ""
-        try:
-            items = list(self.root.tk.splitlist(data))
-        except Exception:
-            items = [data]
-        files = [x for x in items if os.path.isfile(x)]
-        if files:
-            self.attach_files(files)
-        elif data.strip():
-            self.attach_text(data, "Перетащенный текст")
-        return "copy"
+            self.toast("В буфере обмена нет текста — скопируй текст (Ctrl+C) и попробуй ещё раз", "content_paste")
 
     def attach_files(self, paths):
         self.show()
@@ -1258,7 +1075,7 @@ class App:
             added = 0
             for path in paths:
                 name = os.path.basename(path)
-                self.ui_q.put(("mat_status", f"📎 Читаю «{name}»…"))
+                self.ui_q.put(("mat_status", f"Читаю «{name}»…"))
                 try:
                     text, kind = extract_material(path, cli)
                     if not text.strip():
@@ -1275,7 +1092,7 @@ class App:
         self.show()
         self._expand_for_answer()
         self.materials.add(title, text.strip(), "текст")
-        self._write([(f"📎 Добавлено: {title} ({len(text.strip()):,} знаков)\n".replace(",", " "), ("meta",))])
+        self._write([(f"Материал добавлен: {title} ({len(text.strip()):,} знаков)\n".replace(",", " "), ("meta",))])
         self._apply_materials(analyze=True)
 
     def clear_materials(self):
@@ -1283,13 +1100,13 @@ class App:
             return
         self.materials.clear()
         self._apply_materials(analyze=False)
-        self._write([("📎 Материалы убраны.\n", ("meta",))])
+        self.toast("Материалы убраны", "delete_sweep")
 
     def remove_material(self, mid):
         it = next((x for x in self.materials.items if x["id"] == mid), None)
         if it and self.materials.remove(mid):
             self._apply_materials(analyze=False)
-            self._write([(f"📎 Убрано: {it['title']}\n", ("meta",))])
+            self.toast(f"Убрано: {it['title']}", "delete")
 
     def _hotwords(self):
         terms = []
@@ -1300,14 +1117,10 @@ class App:
         return out or None
 
     def _update_mat_bar(self):
-        small = self.compact and not self.expanded_for_answer
-        if self.materials.items and not small:
-            _, cut = self.materials.full_text()
-            self.mat_lbl.config(text="📎 Материалы: " + self.materials.summary()
-                                + (" (слишком много — часть обрезана)" if cut else ""))
-            self.mat_bar.pack(fill="x", after=self._head)
-        else:
-            self.mat_bar.pack_forget()
+        items = [{"id": it["id"], "title": it["title"], "icon": mat_icon(it["title"]),
+                  "size": f"{it['chars']:,} знаков".replace(",", " ")} for it in self.materials.items]
+        cut = self.materials.full_text()[1] if items else False
+        self.web.send("mats", {"items": items, "cut": bool(cut)}, key="mats")
 
     def _apply_materials(self, analyze):
         """Материалы поменялись: новые инструкции, новый диалог, новые подсказки для распознавания."""
@@ -1316,7 +1129,7 @@ class App:
         self.session_gen += 1
         self.history.clear()
         if self.busy and self.via_listen:  # шёл разбор прошлых материалов — новый важнее
-            self._finish(note="[прервано: добавились новые материалы]")
+            self._finish(note="Прервано: добавились новые материалы.")
         if self.listen_session:
             self.listen_session.stop()  # перезапустится с новыми материалами при следующем вопросе
         if self.listen_tr:
@@ -1326,12 +1139,12 @@ class App:
             titles = ", ".join(it["title"] for it in self.materials.items[-3:])
             self.ask("Материалы: " + titles, screen=False, prompt=analyze_prompt(), listen=True, icon="📎")
 
-    def cancel(self, note="[остановлено]"):
+    def cancel(self, note="Остановлено."):
         if self.busy:
             self._finish(note=note)
 
     def reset(self):
-        self.cancel(note="[остановлено]")
+        self.cancel(note="Остановлено.")
         if self.listen_session:
             self.listen_session.stop()  # и вопросы с компьютера начинаем с чистого листа
         self.history.clear()
@@ -1339,34 +1152,24 @@ class App:
         self.session_gen += 1
         self.followup_until = 0.0
         self.error_hint = ""
-        self.text.config(state="normal")
-        self.text.delete("1.0", "end")
-        self.text.config(state="disabled")
-        self._write([("Новая задача — контекст очищен.\n", ("meta",))])
+        self.web.send("clear", {})
+        self.toast("Новая задача — контекст очищен", "add_comment")
 
     def copy(self, code_only=False):
         src = self.cur_answer or self.last_answer
         if not src:
             return
         text = (last_code_block(src) if code_only else None) or src
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self._write([("Скопировано " + ("код" if code_only and last_code_block(src) else "ответ")
-                      + " в буфер обмена.\n", ("meta",))])
+        self._copy_text(text, "код" if code_only and last_code_block(src) else "ответ")
 
     def hide(self):
         if self.visible:
-            self.root.withdraw()
+            self.web.hide()
             self.visible = False
 
     def show(self):
         if not self.visible:
-            self.guard.protect_tk(self.root)
-            self.root.deiconify()
-            if not (IS_WIN or IS_MAC):
-                self.root.overrideredirect(True)
-            self.root.attributes("-topmost", True)
-            self.guard.protect_tk(self.root)
+            self.web.show()
             self.visible = True
 
     def toggle(self):
@@ -1383,40 +1186,48 @@ class App:
             self._write([(f"Значок в трее не запустился: {self.tray.error}\n", ("err",))])
 
     # ------------------------------------------------------------ невидимость на демонстрации экрана
-    def _refresh_shield(self):
-        level, text = self.guard.status(self.root)
-        if (level, text) != getattr(self, "_shield_last", None):
-            self._shield_last = (level, text)
-            color = {"ok": T["OK"], "partial": T["WARN"]}.get(level, T["ERR"])
-            short = {"ok": "🛡 Скрыт от демонстрации экрана", "partial": "⚠ Скрыт не полностью (старая Windows)",
-                     "off": "⚠ Не скрыт: невидимость выключена"}.get(level, "⚠ Не скрыт")
-            self.shield_lbl.config(text=short, fg=color)
-            print("[невидимость]", text, "| окна:", [(hex(h), a) for h, a in self.guard.window_states()])
-        self.root.after(3000, self._refresh_shield)
+    def _refresh_shield(self, again=True):
+        if self.guard is not None:
+            level, text = self.guard.status()
+            if (level, text) != getattr(self, "_shield_last", None):
+                self._shield_last = (level, text)
+                self.web.send("shield", {"level": level, "text": text.replace("🛡 ", "").replace("⚠ ", "")}, key="shield")
+                print("[невидимость]", text, "| окна:", [(hex(h), a) for h, a in self.guard.window_states()])
+        if again:
+            self.root.after(3000, self._refresh_shield)
 
     def capture_check(self):
         """Снимок экрана тем же способом, что у программ демонстрации. → (картинка, прямоугольник окна, ок, текст)."""
-        hwnd = winsys.tk_hwnd(self.root)
+        hwnd = self.web.hwnd
         shot, rect = winsys.grab_monitor_of(hwnd)
         seen = winsys.region_looks_like(shot, rect, [T["BG"], T["BG2"]]) if self.visible else 0.0
-        level, status = self.guard.status(self.root)
+        level, status = self.guard.status()
         # решает защита окна (Windows сама сообщает, что окно исключено из захвата); сравнение цветов —
         # только для журнала: на тёмном фоне за окном оно давало ложную тревогу
         ok = level == "ok"
         print(f"[невидимость] проверка: {status}; доля цветов окна в снимке {seen:.2f}")
         if ok:
-            msg = ("✓ Окна оверлея на снимке нет. Так тебя видят в Zoom, Teams, Discord, Google Meet, OBS и на "
+            msg = ("Окна оверлея на снимке нет. Так тебя видят в Zoom, Teams, Discord, Google Meet, OBS и на "
                    "скриншотах. Оранжевая рамка — где окно стоит на самом деле (на демонстрации её нет).")
         else:
-            msg = "⚠ " + (status if level != "ok" else "Окно оверлея видно на снимке!") + \
-                  " Оранжевая рамка — где стоит окно."
+            msg = status.replace("⚠ ", "") + " Оранжевая рамка — где стоит окно."
         return shot, rect, ok, msg
 
-    def show_capture_check(self, parent=None):
-        from .ui_dialogs import show_capture_check
-        show_capture_check(self, parent)
+    def capture_check_web(self):
+        shot, rect, ok, msg = self.capture_check()
+        return {"img": data_url(shot, 1100, 80), "rect": [int(v) for v in rect], "w": shot.width, "h": shot.height,
+                "ok": ok, "msg": msg}
 
-    # ------------------------------------------------------------ настройки, справка, мастер
+    def show_capture_check(self, parent=None):
+        if parent is not None:   # из окна настроек — отдельным окном
+            from .ui_dialogs import show_capture_check
+            show_capture_check(self, parent)
+            return
+        self.show()
+        self._expand_for_answer()
+        self.web.send("check", {})
+
+    # ------------------------------------------------------------ настройки, справка, история, мастер
     def open_settings(self, tab=None):
         from .ui_settings import SettingsWindow
         if self.settings_win is not None and self.settings_win.alive():
@@ -1424,67 +1235,19 @@ class App:
             return
         self.settings_win = SettingsWindow(self, tab)
 
-    # ------------------------------------------------------------ вопрос текстом и кусок экрана
-    PLACEHOLDER = "Напиши вопрос и нажми Enter…"
-
-    def _build_ask_bar(self, outer, body):
-        """Строка ввода внизу: ✂ (выделить кусок экрана) · поле вопроса · ➤ (отправить)."""
-        bar = self.ask_bar = tk.Frame(outer, bg=T["BG"])
-        if S.text_input:
-            bar.pack(fill="x", side="bottom", before=body)
-        inner = tk.Frame(bar, bg=T["BG3"], highlightthickness=1, highlightbackground=T["BORDER"],
-                         highlightcolor=T["ACCENT"])
-        inner.pack(fill="x", padx=10, pady=(4, 8))
-        self.ask_inner = inner
-        self.crop_btn = IconButton(inner, "crop", self.pick_region,
-                                   f"Выделить кусок экрана для вопроса ({key_display(S.hotkey_region)})")
-        self.crop_btn.pack(side="left", padx=(4, 0))
-        self.shot_chip = tk.Label(inner, text="", bg=T["ACCENT"], fg="#ffffff", font=F(-2, "bold"), padx=6,
-                                  cursor=hand())
-        self.shot_chip.bind("<Button-1>", lambda e: self.set_pending_shot(None))
-        Tooltip(self.shot_chip, "К следующему вопросу приложится выделенный кусок экрана. Щёлкни — убрать.")
-        self.send_btn = IconButton(inner, "send", self.submit_text, "Отправить (Enter)")
-        self.send_btn.pack(side="right", padx=(0, 4))
-        e = self.entry = tk.Entry(inner, bg=T["BG3"], fg=T["FAINT"], insertbackground=T["FG"], relief="flat",
-                                  font=F(0), bd=0, highlightthickness=0, selectbackground=T["SEL"],
-                                  selectforeground=T["FG"], cursor=text_cursor())
-        e.pack(side="left", fill="x", expand=True, padx=6, ipady=6)
-        e.insert(0, self.PLACEHOLDER)
-        e.bind("<FocusIn>", self._entry_focus_in)
-        e.bind("<FocusOut>", self._entry_focus_out)
-        e.bind("<Return>", lambda ev: self.submit_text())
-        e.bind("<Escape>", lambda ev: (e.delete(0, "end"), self.root.focus_set()))
-        # окно без рамки само фокус не получает — забираем его при щелчке в поле
-        e.bind("<ButtonPress-1>", lambda ev: self.focus_entry(), add="+")
-
-    def _entry_focus_in(self, _e=None):
-        if self.entry.get() == self.PLACEHOLDER and self.entry.cget("fg") == T["FAINT"]:
-            self.entry.delete(0, "end")
-        self.entry.config(fg=T["FG"])
-
-    def _entry_focus_out(self, _e=None):
-        if not self.entry.get().strip():
-            self.entry.delete(0, "end")
-            self.entry.insert(0, self.PLACEHOLDER)
-            self.entry.config(fg=T["FAINT"])
-
     def focus_entry(self, force=False):
         """Курсор — в поле вопроса. force: по горячей клавише из другой программы (окно становится активным)."""
         if not S.text_input:
             S.update(text_input=True)
         self.show()
         self._expand_for_answer()
-        winsys.force_foreground(winsys.tk_hwnd(self.root))
-        self.root.focus_force()
-        self.entry.focus_set()
-        self._entry_focus_in()
+        self.web.focus()
 
-    def submit_text(self):
-        text = self.entry.get().strip()
-        if not text or (text == self.PLACEHOLDER and self.entry.cget("fg") == T["FAINT"]):
+    def submit_text(self, text):
+        text = (text or "").strip()
+        if not text:
             return
-        self.entry.delete(0, "end")
-        self.heard_lbl.config(text="Написал: " + text)
+        self.heard("Написал: " + text)
         print(f"[текст] вопрос ({len(text.split())} слов)")
         self.forced_until = self.followup_until = 0.0
         self.next_source = "text"
@@ -1512,34 +1275,49 @@ class App:
             self._picker = RegionPicker(self, done)
         except Exception as e:
             self._picker = None
-            self._write([(f"\nНе удалось выделить кусок экрана: {e}\n", ("err",))])
+            self._write([(f"Не удалось выделить кусок экрана: {e}\n", ("err",))])
 
     def set_pending_shot(self, img):
         self.pending_shot = img
         if img is None:
-            self.shot_chip.pack_forget()
-            self.heard_lbl.config(text="")
+            self.web.send("shot", None, key="shot")
+            self.heard("")
         else:
-            self.shot_chip.config(text=f"✂ {img.width}×{img.height}  ✕")
-            self.shot_chip.pack(side="left", padx=(4, 0), after=self.crop_btn)
-            self.heard_lbl.config(text="✂ Кусок экрана выбран — задай вопрос голосом, текстом или "
-                                       f"{key_display(S.hotkey_listen)}")
+            self.web.send("shot", {"w": img.width, "h": img.height}, key="shot")
+            self.heard("Кусок экрана выбран — задай вопрос голосом, текстом или "
+                       f"{key_display(S.hotkey_listen)}", sticky=True)
             print(f"[кусок экрана] {img.width}×{img.height}")
 
     def open_history(self):
-        from .ui_dialogs import show_history
-        show_history(self)
+        self.show()
+        self._expand_for_answer()
+        self.web.send("history", {})
+
+    def export_history(self, query=""):
+        """Сохранить историю в файл .md (окно «Сохранить как» — от главного окна)."""
+        recs = history.load(query)
+        if not recs:
+            self.toast("Сохранять нечего — история пуста", "info")
+            return
+
+        def work():
+            import webview
+            try:
+                kind = webview.FileDialog.SAVE if hasattr(webview, "FileDialog") else webview.SAVE_DIALOG
+                path = self.web.win.create_file_dialog(kind, save_filename="История Claude Overlay.md",
+                                                       file_types=("Текст с разметкой (*.md)", "Текст (*.txt)"))
+            except Exception as e:
+                print("[история] окно сохранения:", e)
+                return
+            if isinstance(path, (list, tuple)):
+                path = path[0] if path else None
+            if path:
+                history.export_markdown(recs, path)
+                self.ui_q.put(("call", lambda: self.toast(f"Сохранено записей: {len(recs)}", "download_done")))
+        threading.Thread(target=work, daemon=True).start()
 
     def toggle_info(self):
-        """Кнопка «i»: короткая подсказка выпадает под заголовком; повторное нажатие (или щелчок в окне) прячет."""
-        win = getattr(self, "info_win", None)
-        if win is not None:
-            self.info_win = None
-            try:
-                win.destroy()
-            except tk.TclError:
-                pass
-            return
+        """Короткая подсказка — панель под заголовком; повторное нажатие (или щелчок в окне) прячет."""
         k, t8, t9 = key_display(S.hotkey_listen), key_display(S.hotkey_talk), key_display(S.hotkey_toggle)
         rows = [("«Клод, …»", "вопрос по экрану: сделаю скриншот под курсором и отвечу"),
                 ("«Клод, дополни…»", f"тот же диалог; {S.followup_seconds} с после ответа можно без «Клод»"
@@ -1548,55 +1326,26 @@ class App:
                 (k, "вопрос со звука компьютера (лекция, созвон): нажми в начале и в конце · Esc — отмена"),
                 (t8, "следующая фраза — команда без «Клод»"),
                 (t9, "спрятать / показать окно"),
-                (key_display(S.hotkey_region) + " или ✂", "выделить кусок экрана — приложится к следующему вопросу"),
+                (key_display(S.hotkey_region), "выделить кусок экрана — приложится к следующему вопросу"),
                 (key_display(S.hotkey_type), "написать вопрос текстом (поле внизу окна)"),
-                ("📎  📋", "материалы: файлы, текст из буфера или перетащи файл в окно")]
-        w = self.info_win = tk.Toplevel(self.root)
-        w.withdraw()
-        if IS_WIN:
-            w.attributes("-toolwindow", True)
-        w.overrideredirect(True)
-        w.attributes("-topmost", True)
-        w.configure(bg=T["BORDER"])
-        box = tk.Frame(w, bg=T["BG3"])
-        box.pack(fill="both", expand=True, padx=1, pady=1)
-        tk.Label(box, text="Как пользоваться", bg=T["BG3"], fg=T["FG"], font=F(1, "bold"), anchor="w").pack(
-            fill="x", padx=14, pady=(12, 6))
-        width = max(300, self.root.winfo_width() - 24)
-        for key, what in rows:
-            r = tk.Frame(box, bg=T["BG3"])
-            r.pack(fill="x", padx=14, pady=2)
-            tk.Label(r, text=key, bg=T["BG3"], fg=T["ACCENT"], font=F(-1, "bold"), anchor="nw", width=17,
-                     justify="left").pack(side="left", anchor="n")
-            tk.Label(r, text=what, bg=T["BG3"], fg=T["FG"], font=F(-1), anchor="w", justify="left",
-                     wraplength=width - 190).pack(side="left", fill="x", expand=True)
+                ("Скрепка вверху", "материалы: файлы, текст из буфера (Ctrl+V) или перетащи файл в окно")]
         notes = [f"Отвечает: {self._mode_name()}" if (self.cli or self.client or self.provider) else ""]
         if not os.path.isfile(SETUP_STATE_PATH):
-            notes.append("Совет: один раз проверь всё мастером — ⚙ → «Невидимость и система» → «Проверить и починить».")
-        for n in filter(None, notes):
-            tk.Label(box, text=n, bg=T["BG3"], fg=T["MUTED"], font=F(-2), anchor="w", justify="left",
-                     wraplength=width - 30).pack(fill="x", padx=14, pady=(6, 0))
-        foot = tk.Frame(box, bg=T["BG3"])
-        foot.pack(fill="x", padx=14, pady=(10, 12))
-        more = tk.Label(foot, text="Вся справка →", bg=T["BG3"], fg=T["INFO"], font=F(-1), cursor=hand())
-        more.pack(side="left")
-        more.bind("<Button-1>", lambda e: (self.toggle_info(), self.open_help()))
-        close = tk.Label(foot, text="Понятно", bg=T["BG3"], fg=T["MUTED"], font=F(-1), cursor=hand())
-        close.pack(side="right")
-        close.bind("<Button-1>", lambda e: self.toggle_info())
-        w.bind("<Escape>", lambda e: self.toggle_info())
-        w.update_idletasks()
-        x = self.root.winfo_x() + 12
-        y = self.root.winfo_y() + HEADER_H + 4
-        w.geometry(f"{width}x{w.winfo_reqheight()}+{x}+{y}")
-        self.guard.protect_tk(w)
-        w.deiconify()
-        self.guard.protect_tk(w)
-        winsys.style_frame(winsys.tk_hwnd(w), T["BORDER"])
+            notes.append("Совет: один раз проверь всё мастером — ⚙ → «Проверить и починить».")
+        self.show()
+        self._expand_for_answer()
+        self.web.send("info", {"rows": rows, "notes": [n for n in notes if n]})
 
     def open_help(self):
-        from .ui_dialogs import show_help
-        show_help(self)
+        from .ui_dialogs import HELP
+        keys = {"listen": key_display(S.hotkey_listen), "talk": key_display(S.hotkey_talk),
+                "toggle": key_display(S.hotkey_toggle), "followup": S.followup_seconds,
+                "region": key_display(S.hotkey_region), "type": key_display(S.hotkey_type),
+                "pre": f"{S.listen_pre_seconds:g}"}
+        sections = [[title, [[k.format(**keys), d.format(**keys)] for k, d in items]] for title, items in HELP]
+        self.show()
+        self._expand_for_answer()
+        self.web.send("help", {"sections": sections})
 
     def open_wizard(self):
         """«Проверить и починить» = мастер первого запуска. Оверлей закрывается, мастер потом запустит его снова."""
@@ -1612,9 +1361,10 @@ class App:
         self._quit()
 
     def _on_settings(self, changed):
-        """Настройки поменялись в окне ⚙ — применяем сразу, без перезапуска (кроме темы)."""
+        """Настройки поменялись в окне ⚙ — применяем сразу, без перезапуска."""
         if changed <= {"pos_x", "pos_y", "width", "height"} and self._geometry_matches():
             return  # это мы сами запомнили положение после перетаскивания
+        w = self.web
         if changed & {"prompt_system", "prompt_listen", "student_style", "math_render", "listen_style",
                       "cli_image_mode", "materials_max_chars"}:
             self._write_prompts()
@@ -1623,7 +1373,7 @@ class App:
         if changed & {"listen_model", "listen_effort", "listen_max_turns"} and self.listen_session:
             self.listen_session.stop()
             self.listen_session = None
-        if changed & {"backend", "claude_cmd", "provider", "provider_base_url", "provider_model",
+        if changed & {"backend", "claude_cmd", "cli_model", "api_model", "provider", "provider_base_url", "provider_model",
                       "provider_listen_model", "provider_vision", "api_key_saved"}:
             ok, problem = self._init_backend()
             self.session_id = None
@@ -1631,45 +1381,43 @@ class App:
             if self.listen_session:
                 self.listen_session.stop()
                 self.listen_session = None
+            w.send("mode", self._mode_payload(), key="mode")
             self._write([(("Подключение к ИИ: " + self._mode_name() + "\n")
-                          if ok else ("\n" + problem + "\n"), ("meta",) if ok else ("err",))])
+                          if ok else (problem + "\n"), ("meta",) if ok else ("err",))])
         if changed & {k for _, k in HK_ACTIONS}:
             self.hk.set_binds(self._hotkey_actions())
-            self._update_hint()
+            w.send("hotkeys", self._hotkey_labels(), key="hotkeys")
+        prefs = {}
         if "alpha" in changed:
-            try:
-                self.root.attributes("-alpha", float(S.alpha))
-            except tk.TclError:
-                pass
-            self.guard.protect_tk(self.root)
+            prefs["alpha"] = float(S.alpha)
+        if "ghost" in changed:
+            prefs["ghost"] = bool(S.ghost)
+        if "ghost_fade" in changed:
+            prefs["ghost_fade"] = float(S.ghost_fade)
+        if "math_render" in changed:
+            prefs["math"] = bool(S.math_render)
         if "protect" in changed:
             self.guard.set_enabled(S.protect)
             self._shield_last = None
+            self._refresh_shield(again=False)
+            prefs["protect"] = bool(S.protect)
+        if prefs:
+            w.send("prefs", prefs)
         if "tray" in changed:
             if S.tray:
                 self._start_tray()
             elif self.tray:
                 self.tray.stop()
         if "font_size" in changed:
-            self._config_tags()
-            for w in (self.status_lbl,):
-                w.config(font=F(-1))
-            for w in (self.heard_lbl, self.mat_lbl, self.shield_lbl):
-                w.config(font=F(-2))
-            self.math_cache.clear()
-        if "text_input" in changed and not (self.compact and not self.expanded_for_answer):
-            if S.text_input:
-                self.ask_bar.pack(fill="x", side="bottom", before=self.body)
-            else:
-                self.ask_bar.pack_forget()
+            w.send("font", self._fs(), key="font")
+        if "text_input" in changed:
+            w.send("textinput", {"on": bool(S.text_input)}, key="textinput")
         if "compact" in changed:
             self.compact = bool(S.compact)
             self.expanded_for_answer = False
             self._apply_compact()
         if changed & {"width", "height", "pos_x", "pos_y"} and not self._geometry_matches():
             self._place_window()
-            if self.compact and not self.expanded_for_answer:
-                self._apply_compact()
         if "whisper_model" in changed and self.transcriber:
             self.transcriber.request_model(S.whisper_model)
         if "listen_whisper_model" in changed and self.listen_tr:
@@ -1687,24 +1435,10 @@ class App:
             self.retheme()
 
     def retheme(self):
-        """Новая тема — сразу во всех окнах, без перезапуска (формулы перерисовываются новыми цветами)."""
-        if not apply_theme(S.theme, self.root):
-            return
-        self._status_last = self._shield_last = None
-        self._refresh_status()
-        self.math_cache.clear()
-        names = getattr(self, "math_names", {})
-        for _key, name, index in self.text.dump("1.0", "end", image=True):
-            info = names.get(name)
-            imgs = self._math_image(info[0], info[1]) if info else None
-            if imgs and info[2] < len(imgs) and not isinstance(imgs[info[2]], str):
-                self.text.image_configure(index, image=imgs[info[2]])
-        self._window_frame()
+        """Новая тема — сразу и в главном окне, и в окнах настроек."""
+        apply_theme(S.theme, self.root)
+        self.web.send("theme", self._theme_payload(), key="theme")
         print("[тема]", S.theme)
-
-    def _window_frame(self):
-        """Windows 11: скруглённые углы и тонкая рамка цвета темы (на старых Windows просто ничего не меняется)."""
-        winsys.style_frame(winsys.tk_hwnd(self.root), T["BORDER"])
 
     def restart_mic(self):
         if self.listener:
@@ -1714,6 +1448,9 @@ class App:
         self.listener.start()
 
     def _quit(self):
+        if self._quitting:
+            return
+        self._quitting = True
         try:
             print("[выход] закрываю оверлей")
             if self.listen_session:
@@ -1724,9 +1461,40 @@ class App:
                 self._save_geometry()
             except Exception:
                 pass
-            self.root.destroy()
+            self.web.destroy()
         finally:
             os._exit(0)
 
-    def run(self):
-        self.root.mainloop()
+
+# ---------------------------------------------------------------- экран
+def HEAD_PX():
+    from .webwin import HEAD_H
+    return HEAD_H
+
+
+def ctypes_dpi():
+    import ctypes
+    try:
+        return ctypes.windll.user32.GetDpiForSystem()
+    except Exception:
+        return 96
+
+
+def screen_size():
+    import ctypes
+    gm = ctypes.windll.user32.GetSystemMetrics
+    return gm(0), gm(1)
+
+
+def virtual_screen():
+    import ctypes
+    gm = ctypes.windll.user32.GetSystemMetrics
+    return gm(76), gm(77), gm(78), gm(79)
+
+
+def cursor_xy():
+    from .webwin import cursor_pos
+    try:
+        return cursor_pos()
+    except Exception:
+        return 0, 0

@@ -43,7 +43,7 @@ DEFAULTS = {
     "max_tokens": 4096,
     "screen_question": True,          # прикладывать скриншот к «Клод, …»
     "student_style": True,            # решения как в тетради: Дано / Найти / Решение / Ответ
-    "math_render": True,              # рисовать формулы картинками (дроби, корни, степени)
+    "math_render": True,              # рисовать формулы как в учебнике (дроби, корни, степени)
     "math_fontset": "cm",             # шрифт формул: cm / stix / dejavusans
     "prompt_system": "",              # свои инструкции для «Клод, …» ("" — стандартные)
     "prompt_listen": "",              # свои инструкции для F7 ("" — стандартные)
@@ -109,6 +109,8 @@ DEFAULTS = {
     "alpha": 1.0,                     # 1.0 — непрозрачное
     "theme": "dark",                  # dark / midnight / black / warm / light / paper
     "compact": False,                 # маленькая полоска со статусом, разворачивается при ответе
+    "ghost": False,                   # призрачный режим: окно бледнеет, когда мышка не над ним (и ничего не происходит)
+    "ghost_fade": 0.7,                # насколько бледнеет: 0.7 — на 70% прозрачнее
 
     # --- невидимость и система ---
     "protect": True,                  # не показывать окна на демонстрации экрана и скриншотах
@@ -219,7 +221,7 @@ class Settings:
 
 # Разумные пределы: значение из испорченного (или вручную поправленного) файла не должно ронять программу
 RANGES = {
-    "font_size": (8, 24), "width": (300, 4000), "height": (0, 4000), "alpha": (0.3, 1.0),
+    "font_size": (8, 24), "width": (300, 4000), "height": (0, 4000), "alpha": (0.3, 1.0), "ghost_fade": (0.1, 0.95),
     "followup_seconds": (0, 120), "listen_pre_seconds": (0, 10), "listen_post_seconds": (0, 5),
     "listen_max_seconds": (10, 600), "max_image_side": (320, 4096), "listen_image_side": (320, 4096),
     "mic_threshold_mult": (1.0, 10.0), "mic_min_level": (0.0005, 0.2), "end_silence": (0.2, 5.0),

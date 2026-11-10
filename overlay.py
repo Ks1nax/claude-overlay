@@ -70,12 +70,26 @@ def main():
         print("[запуск] оверлей уже запущен — показываю его окно" if inst.wake_other() else
               "[запуск] оверлей уже запущен, но не отвечает — вторую копию не запускаю")
         return
+    from app import webwin
+    problem = webwin.missing()
+    if problem:   # без движка окна программа не откроется — объясняем, что сделать
+        print("[запуск]", problem)
+        import tkinter as tk
+        from tkinter import messagebox
+        r = tk.Tk()
+        r.withdraw()
+        messagebox.showerror("Claude Overlay", problem, parent=r)
+        r.destroy()
+        if webwin.available():
+            import webbrowser
+            webbrowser.open(webwin.WEBVIEW2_URL)
+        return
     from app.ui_main import App
     app = App(inst)
     inst.on_wake(lambda: app.ui_q.put(("show",)))
     inst.on_signal("Quit", lambda: app.ui_q.put(("quit",)))
     if "--settings" in sys.argv:
-        app.root.after(500, app.open_settings)
+        app.ui_q.put(("call", app.open_settings))
     app.run()
 
 

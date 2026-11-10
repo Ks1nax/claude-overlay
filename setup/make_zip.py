@@ -17,6 +17,11 @@ with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
         p = os.path.join(ROOT, "app", name)
         if os.path.isfile(p) and name.endswith((".py", ".ico", ".png")):
             z.write(p, "claude_overlay/app/" + name)
+    web = os.path.join(ROOT, "app", "web")      # окно программы: страница, стили, шрифты значков, формулы
+    for dirpath, _dirs, files in os.walk(web):
+        for name in sorted(files):
+            p = os.path.join(dirpath, name)
+            z.write(p, "claude_overlay/" + os.path.relpath(p, ROOT).replace(os.sep, "/"))
 os.replace(tmp, OUT)
 with zipfile.ZipFile(OUT) as z:
     for i in z.infolist():

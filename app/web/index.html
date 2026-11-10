@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Claude Overlay</title>
+<link rel="stylesheet" href="vendor/katex/katex.min.css">
+<link rel="stylesheet" href="app.css">
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/katex/katex.min.js"></script>
+<script src="vendor/highlight.min.js"></script>
+</head>
+<body>
+<div id="win">
+  <div id="head">
+    <div id="logo"><i></i><i></i><i></i><i></i><i></i></div>
+    <span id="title">Claude Overlay</span>
+    <span id="islandTxt"></span>
+    <button id="model" class="nodrag" data-tip="Кто отвечает"><span class="dot"></span><span id="modelTxt">…</span><span class="ic sm">expand_more</span></button>
+    <span class="sp"></span>
+    <button class="hb nodrag" id="bMat" data-tip="Материалы: файлы и текст"><span class="ic">attach_file</span><span class="badge" id="matCount"></span></button>
+    <button class="hb nodrag" id="bHist" data-tip="История вопросов и ответов"><span class="ic">history</span></button>
+    <button class="hb nodrag" id="bNew" data-tip="Новая задача (очистить диалог)"><span class="ic">add_comment</span></button>
+    <button class="hb nodrag" id="bGear" data-tip="Настройки и справка"><span class="ic">settings</span></button>
+    <button class="hb nodrag keep" id="bCompact" data-tip="Компактно / развернуть"><span class="ic" id="icCompact">close_fullscreen</span></button>
+    <button class="hb nodrag keep" id="bHide" data-tip="Спрятать"><span class="ic">remove</span></button>
+    <button class="hb nodrag keep close" id="bClose" data-tip="Выход"><span class="ic">close</span></button>
+  </div>
+
+  <div id="steps">
+    <span id="stepsRow">
+      <span class="st" data-s="hear">Слышу</span><span class="arr">›</span>
+      <span class="st" data-s="stt">Распознаю</span><span class="arr">›</span>
+      <span class="st" data-s="think">Думаю</span><span class="arr">›</span>
+      <span class="st" data-s="answer">Отвечаю</span>
+    </span>
+    <span id="statusTxt"></span>
+    <button id="shield" class="nodrag" data-tip="Проверить: каким окно видят на демонстрации экрана"><span class="ic fill">verified_user</span><span id="shieldTxt">Невидим</span></button>
+  </div>
+  <div id="heard"></div>
+
+  <div id="feedWrap">
+    <div id="feed"></div>
+    <button id="down" data-tip="К последнему ответу"><span class="ic">arrow_downward</span></button>
+  </div>
+
+  <div id="rec">
+    <div class="top"><span class="rd"></span><span>Запись звука компьютера</span><span class="tm" id="recT">0:00</span>
+      <span class="hint" id="recHint"></span></div>
+    <canvas id="wave" width="800" height="80"></canvas>
+  </div>
+
+  <div id="mats"></div>
+  <div id="ask">
+    <button class="hb" id="bCrop"><span class="ic">screenshot_region</span></button>
+    <span id="shotChip" data-tip="К следующему вопросу приложится этот кусок экрана. Щёлкни — убрать."></span>
+    <input id="inp" autocomplete="off" spellcheck="false">
+    <button id="send" data-tip="Отправить (Enter)"><span class="ic">arrow_upward</span></button>
+  </div>
+  <div id="foot"></div>
+
+  <div id="panel"><div id="panelBody"></div></div>
+  <div id="toast"></div>
+  <div id="tip"></div>
+  <div class="menu" id="menu"></div>
+  <div id="modal"><div class="box"><div id="modalTxt"></div><div class="btns"><button id="modalNo" class="btn">Отмена</button><button id="modalYes" class="btn danger">Да</button></div></div></div>
+  <div id="zoom"><img id="zoomImg" alt=""></div>
+
+  <div class="rz" data-e="l"></div><div class="rz" data-e="r"></div><div class="rz" data-e="b"></div>
+  <div class="rz" data-e="bl"></div><div class="rz" data-e="br"></div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

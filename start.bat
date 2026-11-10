@@ -11,7 +11,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 rem докачать библиотеки, если после обновления оверлея добавились новые
-".venv\Scripts\python.exe" -c "import faster_whisper, sounddevice, mss, PIL, pynput, matplotlib, pypdf, tkinterdnd2, pystray" 2>nul
+".venv\Scripts\python.exe" -c "import faster_whisper, sounddevice, mss, PIL, pynput, matplotlib, pypdf, webview, pystray" 2>nul
 if errorlevel 1 (
     echo Ставлю недостающие библиотеки...
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt

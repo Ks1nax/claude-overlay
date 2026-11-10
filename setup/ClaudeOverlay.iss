@@ -54,6 +54,7 @@ Source: "..\requirements.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\app\*.py"; DestDir: "{app}\app"; Flags: ignoreversion
 Source: "..\app\icon.ico"; DestDir: "{app}\app"; Flags: ignoreversion
 Source: "..\app\icon.png"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "..\app\web\*"; DestDir: "{app}\app\web"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "install.ps1"; DestDir: "{app}\setup"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\КАК ЗАПУСТИТЬ.txt"; DestDir: "{app}"; Flags: ignoreversion
@@ -126,6 +127,9 @@ begin
     end else if Arg = 'venv' then begin
       DepsPage.SetText('Создаю окружение программы…', '');
       DepsPage.SetProgress(30, 100);
+    end else if Arg = 'webview' then begin
+      DepsPage.SetText('Ставлю компонент Microsoft Edge WebView2 — на нём работает окно программы…', '');
+      DepsPage.SetProgress(96, 100);
     end else if Arg = 'libs' then begin
       DepsPage.SetText('Скачиваю и ставлю библиотеки распознавания речи (первый раз — несколько минут)…', '');
       DepsPage.SetProgress(34, 100);

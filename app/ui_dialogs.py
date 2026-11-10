@@ -5,28 +5,79 @@ import tkinter as tk
 
 from .config import S
 from .hotkeys import display as key_display
-from .ui_theme import T, F, MONO, IS_WIN, Button, ThinScroll, label, dark_title_bar, text_cursor
+from . import winsys
+from .ui_theme import T, F, MONO, IS_WIN, Button, RoundIconButton, ThinScroll, label, text_cursor
+
+HEAD_H = 44
 
 
 def make_dialog(app, title, tool=True, size=None, parent=None):
-    """Обычное окно Windows с тёмным заголовком. tool=True — без кнопки на панели задач."""
+    """Окно без рамки Windows, как главное: свой заголовок (перетаскивание, крестик), скруглённые углы,
+    размер — за правый нижний уголок. Нет кнопки на панели задач и в Alt+Tab, невидимо на демонстрации."""
     top = tk.Toplevel(parent or app.root)
     top.withdraw()
     top.title(title)
     top.configure(bg=T["BG"])
-    if IS_WIN and tool:
-        top.attributes("-toolwindow", True)
+    if IS_WIN:
+        top.attributes("-toolwindow", True)    # ДО overrideredirect (иначе Tk сбросит признак окна-инструмента)
+    top.overrideredirect(True)
     top.attributes("-topmost", True)
-    try:
-        from .config import ICON_PATH
-        top.iconbitmap(ICON_PATH)
-    except Exception:
-        pass
     if size:
         top.geometry(size)
+    head = tk.Frame(top, bg=T["BG2"], height=HEAD_H)
+    head.pack(fill="x", side="top")
+    head.pack_propagate(False)
+    name = tk.Label(head, text=title, bg=T["BG2"], fg=T["MUTED"], font=F(-1), anchor="w")
+    name.pack(side="left", padx=(16, 8), fill="x", expand=True)
+    RoundIconButton(head, "close", lambda: _close(top), "Закрыть (Esc)", danger=True).pack(side="right", padx=8)
+    tk.Frame(top, bg=T["BORDER"], height=1).pack(fill="x", side="top")
+    for w in (head, name):
+        w.bind("<ButtonPress-1>", lambda e: _grab(top, e, "move"))
+        w.bind("<B1-Motion>", lambda e: _drag(top, e))
+    grip = tk.Label(top, text="◢", bg=T["BG"], fg=T["FAINT"], font=F(-3))
+    grip.place(relx=1.0, rely=1.0, x=-3, y=-1, anchor="se")
+    grip.bind("<ButtonPress-1>", lambda e: _grab(top, e, "size"))
+    grip.bind("<B1-Motion>", lambda e: _drag(top, e))
+    top._grip = grip
+    # окно без рамки само клавиатуру не получает — забираем её при щелчке (поля ввода в настройках)
+    top.bind("<ButtonPress-1>", lambda e: _activate(top), add="+")
     top.update_idletasks()
-    app.guard.protect_tk(top, tool=tool)
+    app.guard.protect_tk(top, tool=True)
     return top
+
+
+def _close(top):
+    """Крестик — как закрытие окна Windows: обработчик WM_DELETE_WINDOW, если он задан, иначе просто закрыть."""
+    try:
+        cmd = top.protocol("WM_DELETE_WINDOW")
+        if cmd:
+            top.tk.call(cmd)
+        else:
+            top.destroy()
+    except tk.TclError:
+        pass
+
+
+def _activate(top):
+    try:
+        if IS_WIN and top.winfo_exists():
+            winsys.force_foreground(winsys.tk_hwnd(top))
+    except tk.TclError:
+        pass
+
+
+def _grab(top, e, kind):
+    top._drag = (kind, e.x_root, e.y_root, top.winfo_x(), top.winfo_y(), top.winfo_width(), top.winfo_height())
+
+
+def _drag(top, e):
+    kind, x0, y0, wx, wy, ww, wh = getattr(top, "_drag", ("move", e.x_root, e.y_root, 0, 0, 0, 0))
+    dx, dy = e.x_root - x0, e.y_root - y0
+    if kind == "move":
+        top.geometry(f"+{wx + dx}+{wy + dy}")
+    else:
+        mw, mh = top.minsize()
+        top.geometry(f"{max(mw or 300, ww + dx)}x{max(mh or 200, wh + dy)}")
 
 
 def show_dialog(app, top, center=True):
@@ -36,12 +87,15 @@ def show_dialog(app, top, center=True):
         w, h = top.winfo_width() if top.winfo_width() > 50 else top.winfo_reqwidth(), \
             top.winfo_height() if top.winfo_height() > 50 else top.winfo_reqheight()
         top.geometry(f"+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
-    dark_title_bar(top)
-    app.guard.protect_tk(top, tool=False)
+    app.guard.protect_tk(top, tool=True)
     top.deiconify()
-    app.guard.protect_tk(top, tool=False)
+    app.guard.protect_tk(top, tool=True)
+    winsys.style_frame(winsys.tk_hwnd(top), T["BORDER"])     # скруглённые углы Windows 11 и тонкая рамка
     top.lift()
+    if getattr(top, "_grip", None) is not None:
+        top._grip.lift()
     top.focus_force()
+    _activate(top)
 
 
 def show_capture_check(app, parent=None):
@@ -115,23 +169,32 @@ HELP = [
         ("Esc во время записи", "отменить запись"),
         ("{talk}", "следующая фраза — команда без «Клод»"),
         ("{toggle}", "спрятать / показать окно"),
-        ("{region} или ✂ внизу окна", "выделить мышкой кусок экрана — он приложится к следующему вопросу вместо всего экрана"),
+        ("{region} или рамка слева в поле вопроса", "выделить мышкой кусок экрана — он приложится к следующему вопросу вместо всего экрана"),
         ("{type}", "написать вопрос текстом: курсор встанет в поле внизу окна; Enter — отправить"),
         ("Ctrl+V в окне", "текст из буфера — в материалы"),
+        ("Ctrl + колёсико, Ctrl+плюс/минус", "крупнее / мельче текст"),
     ]),
     ("Кнопки вверху окна", [
-        ("📎", "прикрепить файлы: PDF, Word, PowerPoint, текст, картинки (или перетащи файл в окно)"),
-        ("📋", "текст из буфера обмена — в материалы"),
-        ("⟲", "новая задача: очистить диалог"),
-        ("🕘", "история: все прошлые вопросы и ответы, поиск, сохранить в файл"),
-        ("⚙", "настройки: модели распознавания, звук, подключение к ИИ, клавиши, вид, невидимость"),
-        ("ⓘ", "короткие подсказки — эта справка открывается оттуда"),
-        ("▭", "компактный режим: только строка состояния, при ответе окно разворачивается"),
-        ("—", "спрятать окно"),
+        ("Модель (рядом с названием)", "кто отвечает; щёлкни — сменить ИИ или модель"),
+        ("Скрепка", "материалы: прикрепить файлы (PDF, Word, PowerPoint, текст, картинки), текст из буфера, "
+                    "убрать; файл можно и просто перетащить в окно"),
+        ("Часы", "история: все прошлые вопросы и ответы, поиск, сохранить в файл"),
+        ("Облачко с плюсом", "новая задача: очистить диалог"),
+        ("Шестерёнка", "настройки, подсказки, справка, проверка невидимости, размер текста, тема, призрачный режим"),
+        ("Стрелки внутрь", "компактный режим: только полоска со статусом, при ответе окно разворачивается"),
+        ("Минус", "спрятать окно"),
+        ("Двойной щелчок по заголовку", "тоже компактный режим; за заголовок окно перетаскивается, за края — "
+                                        "меняется размер"),
+    ]),
+    ("Под ответом", [
+        ("Копировать", "весь ответ в буфер обмена (у каждого блока кода — своя кнопка)"),
+        ("Короче · Подробнее · Объясни проще · Пример", "уточнить ответ одной кнопкой — в том же диалоге"),
+        ("Миниатюра справа от вопроса", "что увидел Claude; щёлкни — крупно"),
     ]),
     ("Невидимость", [
-        ("🛡 внизу окна", "окна оверлея не видно на демонстрации экрана и скриншотах; щёлкни — покажу снимок, "
-                         "каким его видит собеседник"),
+        ("Щит «Невидим» вверху", "окна оверлея не видно на демонстрации экрана и скриншотах; щёлкни — покажу "
+                                 "снимок, каким его видит собеседник"),
+        ("Призрачный режим", "окно бледнеет, когда мышка не над ним (шестерёнка → «Призрачный режим»)"),
     ]),
 ]
 

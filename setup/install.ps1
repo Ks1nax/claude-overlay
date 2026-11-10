@@ -233,13 +233,39 @@ function Main {
         throw "Библиотеки не поставились (код $pipCode). Чаще всего — нет интернета или его режет антивирус/прокси. Запусти установку ещё раз: она продолжит."
     }
     $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & $VPy -c "import faster_whisper, sounddevice, mss, PIL, pynput, matplotlib, pypdf, tkinterdnd2, pystray, numpy" 2>$null
+    & $VPy -c "import faster_whisper, sounddevice, mss, PIL, pynput, matplotlib, pypdf, webview, pystray, numpy" 2>$null
     $ok = ($LASTEXITCODE -eq 0)
     $ErrorActionPreference = $old
     if (-not $ok) { Emit "FAIL" "imports"; throw "Библиотеки поставились не все — запусти установку ещё раз." }
+
+    # 4. движок окна — Microsoft Edge WebView2 (в Windows 11 уже есть; в Windows 10 бывает не всегда)
+    if (-not (Test-WebView2)) {
+        Emit "STEP" "webview"
+        Say "Ставлю компонент Microsoft Edge WebView2 (нужен окну программы)..." "White"
+        $wv = Join-Path $env:TEMP "MicrosoftEdgeWebview2Setup.exe"
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $wv
+            Start-Process -FilePath $wv -ArgumentList "/silent", "/install" -Wait
+        } catch {
+            Say "  не получилось: $($_.Exception.Message)" "Yellow"
+        }
+        if (Test-WebView2) { Say "  готово" "Green" }
+        else { Say "  Не поставился. Программа подскажет при запуске, где его скачать." "Yellow" }
+    }
     Emit "DONE" "0"
     Say ""
     Say "  Готово!" "Green"
+}
+
+function Test-WebView2 {
+    $id = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    foreach ($k in @("HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$id",
+                     "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$id",
+                     "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$id")) {
+        $v = (Get-ItemProperty -Path $k -Name pv -ErrorAction SilentlyContinue).pv
+        if ($v -and $v -ne "0.0.0.0") { return $true }
+    }
+    return (Test-Path "${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application")
 }
 
 if ($ListOnly) {
